@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "zendesk": {
+      "command": "python",
+      "args": ["/Users/ユーザー名/mcp-servers/zendesk/server.py"],
+      "env": {
+        "ZENDESK_SUBDOMAIN": "yoursubdomain",
+        "ZENDESK_EMAIL": "you@example.com",
+        "ZENDESK_API_TOKEN": "xxxxxxxxxxxxxxxxxxx"
+      }
+    }
+  }
+}
