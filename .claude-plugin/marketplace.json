@@ -1,0 +1,14 @@
+{
+  "name": "zendesk-mcp",
+  "owner": {
+    "name": "OhshiroC"
+  },
+  "description": "Zendesk MCP Server プラグインのマーケットプレイス",
+  "plugins": [
+    {
+      "name": "zendesk-mcp-server",
+      "source": "./",
+      "description": "Zendesk を Claude から直接操作する MCP サーバー（チケット・ナレッジベース・ユーザー・CSAT の15ツール）"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "zendesk": {
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server.py"],
+      "env": {
+        "ZENDESK_SUBDOMAIN": "${ZENDESK_SUBDOMAIN}",
+        "ZENDESK_EMAIL": "${ZENDESK_EMAIL}",
+        "ZENDESK_API_TOKEN": "${ZENDESK_API_TOKEN}"
+      }
+    }
+  }
+}
