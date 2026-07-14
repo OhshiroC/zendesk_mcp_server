@@ -1,0 +1,12 @@
+{
+  "name": "zendesk-mcp-server",
+  "displayName": "Zendesk MCP Server",
+  "version": "1.1.0",
+  "description": "Zendesk を Claude から直接操作する MCP サーバー（チケット・ナレッジベース・ユーザー・CSAT の15ツール）",
+  "author": {
+    "name": "OhshiroC"
+  },
+  "repository": "https://github.com/OhshiroC/zendesk_mcp_server",
+  "keywords": ["zendesk", "mcp", "support", "helpdesk"],
+  "mcpServers": "./.mcp.json"
+}
