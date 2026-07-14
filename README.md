@@ -51,7 +51,34 @@ Python 3.12 標準ライブラリで動作します。
 **発行場所:**
 Zendesk管理画面 → Apps and integrations → APIs → Zendesk API → Add API token
 
-### 2. Claude Desktop に登録
+### 2. 認証情報を環境変数に設定
+
+3つの環境変数を shell の設定（`~/.zshrc` / `~/.bashrc` / direnv など）に追加します。
+プラグインはこれらの値を保持せず、起動時に環境変数から読み込みます。
+
+```sh
+export ZENDESK_SUBDOMAIN="yoursubdomain"
+export ZENDESK_EMAIL="you@example.com"
+export ZENDESK_API_TOKEN="xxxxxxxxxxxxxxxxxxx"
+```
+
+### 3. インストール
+
+#### 方法A: Claude Code プラグイン（推奨）
+
+このリポジトリ自身がプラグインのマーケットプレイスになっています。
+Claude Code で以下を実行します。
+
+```
+/plugin marketplace add OhshiroC/zendesk_mcp_server
+/plugin install zendesk-mcp-server@zendesk-mcp
+```
+
+インストール後、セッションを開始すると MCP サーバーが起動し、ツールが利用可能になります
+（すでにセッション中の場合は `/reload-plugins`）。
+`python3` が PATH 上にあり、Python 3.12 以上であることが前提です。
+
+#### 方法B: Claude Desktop に手動登録
 
 `claude_desktop_config.json` の内容を Claude Desktop の設定ファイルにマージします。
 
@@ -76,9 +103,6 @@ Zendesk管理画面 → Apps and integrations → APIs → Zendesk API → Add A
 ```
 
 `/Users/ユーザー名/mcp-servers/zendesk/server.py` は実際のフルパスに変更してください。
-
-### 3. Claude Desktop を再起動
-
 設定後、Claude Desktop を再起動するとツールが有効になります。
 
 ---
@@ -120,8 +144,12 @@ Zendesk管理画面 → Apps and integrations → APIs → Zendesk API → Add A
 
 ```
 zendesk-mcp-server/
-├── server.py                  # MCPサーバー本体（これだけあれば動きます）
-├── .env.example               # 環境変数のテンプレート
-├── claude_desktop_config.json # Claude Desktop 設定サンプル
+├── server.py                    # MCPサーバー本体（これだけあれば動きます）
+├── .mcp.json                    # プラグイン用の MCP サーバー起動定義
+├── .claude-plugin/
+│   ├── plugin.json              # プラグインマニフェスト
+│   └── marketplace.json         # このリポを1プラグインのマーケットとして定義
+├── .env.example                 # 環境変数のテンプレート
+├── claude_desktop_config.json   # Claude Desktop 設定サンプル（手動登録用）
 └── README.md
 ```
