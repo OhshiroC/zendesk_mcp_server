@@ -105,6 +105,41 @@ Claude Code で以下を実行します。
 `/Users/ユーザー名/mcp-servers/zendesk/server.py` は実際のフルパスに変更してください。
 設定後、Claude Desktop を再起動するとツールが有効になります。
 
+#### 方法C: .mcpb バンドル（Claude Desktop 拡張機能）
+
+`.mcpb` バンドルをビルドすると、Claude Desktop の拡張機能としてワンクリックでインストールでき、
+Zendesk の認証情報を **設定画面（GUI）から入力**できます（環境変数を手で設定する必要がありません）。
+
+**ビルドの前提条件**
+- Node.js / `npx` が利用可能であること（初回ビルド時に `@anthropic-ai/mcpb` を npm から取得するためネットワーク接続が必要）
+- `make` が利用可能であること
+
+**ビルド手順**
+
+```sh
+make mcpb
+```
+
+`dist/zendesk-mcp-server.mcpb` が生成されます（`make validate` で manifest 検証のみ、`make clean` で生成物削除）。
+
+**インストール手順**
+1. 生成された `dist/zendesk-mcp-server.mcpb` を Claude Desktop のウィンドウにドラッグ＆ドロップする
+   （または 設定 → Extensions から `.mcpb` ファイルを指定してインストールする）。
+2. インストール時に表示される設定画面で、以下を入力する:
+   - **Zendesk Subdomain**: `yourcompany`（`https://yourcompany.zendesk.com` の `yourcompany` 部分）
+   - **Zendesk Email**: ログインに使うメールアドレス
+   - **Zendesk API Token**: Zendesk 管理画面で発行した API トークン
+   - **Python Path**（任意）: 通常は空欄のままで `python3` が使われます。
+3. 有効化するとツールが利用可能になります。
+
+**注意: Python の実行パスについて**
+- このサーバーは Python 3.12 以上（標準ライブラリのみ）で動作します。Claude Desktop は Python を同梱しないため、
+  お使いの PC の Python を使用します。
+- **macOS では、Finder / Dock から起動した Claude Desktop の PATH が最小限**（`/usr/bin` など）になり、
+  Homebrew や pyenv で入れた `python3` が見つからず起動に失敗することがあります。
+  その場合は設定画面の **Python Path** に **フルパス**を指定してください（例: `/opt/homebrew/bin/python3`）。
+  フルパスは `which python3` で確認できます。
+
 ---
 
 ## 使用例
@@ -145,6 +180,9 @@ Claude Code で以下を実行します。
 ```
 zendesk-mcp-server/
 ├── server.py                    # MCPサーバー本体（これだけあれば動きます）
+├── manifest.json                # MCPB バンドル用マニフェスト（方法C・GUI設定定義）
+├── Makefile                     # `make mcpb` で .mcpb をビルド
+├── .mcpbignore                  # .mcpb パッケージングの除外設定
 ├── .mcp.json                    # プラグイン用の MCP サーバー起動定義
 ├── .claude-plugin/
 │   ├── plugin.json              # プラグインマニフェスト

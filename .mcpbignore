@@ -1,0 +1,14 @@
+.git/
+.gitignore
+.omc/
+.claude/
+.claude-plugin/
+.mcp.json
+dist/
+node_modules/
+*.mcpb
+claude_desktop_config.json
+.env.example
+Makefile
+.mcpbignore
+.DS_Store

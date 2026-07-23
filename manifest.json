@@ -1,0 +1,62 @@
+{
+  "manifest_version": "0.3",
+  "name": "zendesk-mcp-server",
+  "display_name": "Zendesk MCP Server",
+  "version": "1.1.0",
+  "description": "Zendesk を Claude から直接操作する MCP サーバー（チケット・ナレッジベース・ユーザー・CSAT の15ツール）",
+  "author": {
+    "name": "OhshiroC"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OhshiroC/zendesk_mcp_server"
+  },
+  "keywords": ["zendesk", "mcp", "support", "helpdesk"],
+  "server": {
+    "type": "python",
+    "entry_point": "server.py",
+    "mcp_config": {
+      "command": "${user_config.python_path}",
+      "args": ["${__dirname}/server.py"],
+      "env": {
+        "ZENDESK_SUBDOMAIN": "${user_config.zendesk_subdomain}",
+        "ZENDESK_EMAIL": "${user_config.zendesk_email}",
+        "ZENDESK_API_TOKEN": "${user_config.zendesk_api_token}"
+      }
+    }
+  },
+  "user_config": {
+    "zendesk_subdomain": {
+      "type": "string",
+      "title": "Zendesk Subdomain",
+      "description": "Zendesk のサブドメイン名（例: yourcompany）。https://yourcompany.zendesk.com の yourcompany 部分",
+      "required": true
+    },
+    "zendesk_email": {
+      "type": "string",
+      "title": "Zendesk Email",
+      "description": "Zendesk にログインするメールアドレス",
+      "required": true
+    },
+    "zendesk_api_token": {
+      "type": "string",
+      "title": "Zendesk API Token",
+      "description": "Zendesk 管理画面で発行した API トークン",
+      "sensitive": true,
+      "required": true
+    },
+    "python_path": {
+      "type": "string",
+      "title": "Python Path",
+      "description": "Python 3.12 以上の実行コマンドまたはフルパス。通常は変更不要。macOS の場合はフルパスの指定を推奨（例: /opt/homebrew/bin/python3）。`which python3` で確認できます",
+      "required": false,
+      "default": "python3"
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "python": ">=3.12"
+    }
+  }
+}
