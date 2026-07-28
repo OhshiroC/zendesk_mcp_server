@@ -1,0 +1,42 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  # タグを打たずにバンドルのビルドだけを検証できるようにする。
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "26"
+
+      - name: Build .mcpb bundle
+        run: make mcpb
+
+      - name: Upload .mcpb to release
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            dist/zendesk-mcp-server.mcpb \
+            --clobber
+
+      # .tagpr で release = draft にしているのは、アセット添付前に Release が公開され
+      # 「.mcpb が付いていない Release」を利用者が取得してしまうのを防ぐため。
+      # 添付が完了したこの時点で初めて公開する。
+      - name: Publish draft release
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${GITHUB_REF_NAME}" --draft=false
