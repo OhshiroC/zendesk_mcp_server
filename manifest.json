@@ -21,7 +21,8 @@
       "env": {
         "ZENDESK_SUBDOMAIN": "${user_config.zendesk_subdomain}",
         "ZENDESK_EMAIL": "${user_config.zendesk_email}",
-        "ZENDESK_API_TOKEN": "${user_config.zendesk_api_token}"
+        "ZENDESK_API_TOKEN": "${user_config.zendesk_api_token}",
+        "ZENDESK_MASK_PII": "${user_config.mask_pii}"
       }
     }
   },
@@ -51,6 +52,13 @@
       "description": "Python 3.12 以上の実行コマンドまたはフルパス。通常は変更不要。macOS の場合はフルパスの指定を推奨（例: /opt/homebrew/bin/python3）。`which python3` で確認できます",
       "required": false,
       "default": "python3"
+    },
+    "mask_pii": {
+      "type": "boolean",
+      "title": "PII マスキング",
+      "description": "Zendesk から取得した個人情報（ユーザー名・メールアドレス・電話番号）を [NAME] / [EMAIL] / [PHONE] に置き換えてから返します。オフにすると生の値がそのまま返ります。",
+      "required": false,
+      "default": true
     }
   },
   "compatibility": {

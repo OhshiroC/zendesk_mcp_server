@@ -14,6 +14,7 @@ Zendesk MCP Server（ローカル実行版）
 
 import json
 import os
+import re
 import sys
 import ssl
 import base64
@@ -30,6 +31,57 @@ ZENDESK_SUBDOMAIN = os.environ.get("ZENDESK_SUBDOMAIN", "")
 ZENDESK_EMAIL     = os.environ.get("ZENDESK_EMAIL", "")
 ZENDESK_API_TOKEN = os.environ.get("ZENDESK_API_TOKEN", "")
 ZENDESK_BASE      = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2"
+
+
+# ── PII マスキング ────────────────────────────────────────
+# Zendesk から得た応答に含まれる個人情報(メール・電話番号)を固定プレースホルダに
+# 置換してクライアントに返す。CLAUDE.md の Functional Core 方針に従い、マスク処理は
+# 副作用のない純粋関数として実装し、ON/OFF の判定は呼び出し側(チョークポイント)で行う。
+
+def _parse_mask_pii_env(value: str | None) -> bool:
+    # 未設定(None) や不明値は安全側に倒して ON とみなす。明示的な OFF のみ False。
+    if value is None:
+        return True
+    return value.strip().lower() not in ("0", "false")
+
+
+# デフォルト ON。ZENDESK_MASK_PII=0 / false でマスクを無効化できる。
+MASK_PII = _parse_mask_pii_env(os.environ.get("ZENDESK_MASK_PII"))
+
+_EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-']+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+
+# 電話番号は形式別パターンで最低桁数を保証する。セパレータには \s を使わない
+# (\s は \n にマッチし、改行を跨いだ誤マッチ — 例: 行末の日付 07-23 と次行先頭の 0120 —
+#  を起こすため)。リテラルスペースのみ許可する。
+_INTL_PHONE_RE = re.compile(r"\+81[\- ]?\d{1,4}[\- ]?\d{1,4}[\- ]?\d{4}(?!\d)")
+_NATIONAL_PHONE_RES = [
+    re.compile(r"(?<![#\d])0[5-9]0[\- ]?\d{4}[\- ]?\d{4}(?!\d)"),               # 携帯 11桁
+    re.compile(r"(?<![#\d])0120[\- ]?\d{3}[\- ]?\d{3}(?!\d)"),                  # フリーダイヤル 0120 10桁
+    re.compile(r"(?<![#\d])0800[\- ]?\d{3}[\- ]?\d{4}(?!\d)"),                  # フリーダイヤル 0800 11桁
+    re.compile(r"(?<![#\d])\(0[1-9]\d{0,3}\)[\- ]?\d{2,4}[\- ]?\d{4}(?!\d)"),   # 括弧付き市外局番
+    re.compile(r"(?<![#\d])0[1-9]\d{2}[\- ]?\d{2}[\- ]?\d{4}(?!\d)"),           # 固定 4桁市外局番 10桁
+    re.compile(r"(?<![#\d])0[1-9]\d[\- ]?\d{3}[\- ]?\d{4}(?!\d)"),              # 固定 3桁市外局番 10桁
+    re.compile(r"(?<![#\d])0[1-9][\- ]?\d{4}[\- ]?\d{4}(?!\d)"),                # 固定 2桁市外局番 10桁
+]
+
+
+# 既知の制限(意図的な検出漏れ): 全角数字の電話番号(０９０…)、0081 形式の国際表記、
+# IDN(非ASCII)メールは検出しない。全文の全角→半角正規化は PII でない全角数字まで
+# 書き換えてしまい、設計原則「Precision over Recall(誤検出の悪影響 > 検出漏れ)」に反するため。
+def _mask_intl_phone(m: "re.Match") -> str:
+    # +81 以降の桁数が 9-10 桁のときだけ電話番号とみなす(短すぎる +81XXXX は誤検出)
+    digits = sum(c.isdigit() for c in m.group()[3:])
+    return "[PHONE]" if 9 <= digits <= 10 else m.group()
+
+
+def mask_pii_text(text: str) -> str:
+    # この関数は MASK_PII を参照せず、常にマスクを実行する純粋関数。
+    # メールを先に置換することで、メール内の数字列が電話番号として誤検出されるのを防ぐ。
+    text = _EMAIL_RE.sub("[EMAIL]", text)
+    text = _INTL_PHONE_RE.sub(_mask_intl_phone, text)
+    for pat in _NATIONAL_PHONE_RES:
+        text = pat.sub("[PHONE]", text)
+    return text
 
 
 # ── Zendesk API ヘルパー ──────────────────────────────────
@@ -519,7 +571,6 @@ def tool_get_kb_article(args: dict) -> str:
     data    = zd_get(path)
     article = data.get("article", {})
 
-    import re
     body = re.sub(r"<[^>]+>", "", article.get("body", ""))
     body = re.sub(r"\n{3,}", "\n\n", body).strip()
 
@@ -670,11 +721,16 @@ def tool_get_user(args: dict) -> str:
         if v not in (None, "", []):
             cf_lines.append(f"  {k}: {v}")
 
+    # 名前・メールは構造フィールドの PII。regex では人名を検出できないため、
+    # ここでフィールド単位でプレースホルダに差し替える(ON/OFF は MASK_PII で制御)。
+    name_display  = "[NAME]" if MASK_PII else user.get('name')
+    email_display = "[EMAIL]" if MASK_PII else user.get('email')
+
     lines = [
         "# ユーザー情報",
         f"ID      : {user.get('id')}",
-        f"名前    : {user.get('name')}",
-        f"メール  : {user.get('email')}",
+        f"名前    : {name_display}",
+        f"メール  : {email_display}",
         f"ロール  : {user.get('role')}",
         f"組織ID  : {user.get('organization_id', 'なし')}",
         f"タグ    : {', '.join(user.get('tags', [])) or 'なし'}",
@@ -755,6 +811,14 @@ def tool_update_kb_article(args: dict) -> str:
     return "\n".join(lines)
 
 
+# KB ツールは記事本文(サポート窓口の連絡先等)を返すため、regex マスクの対象外にする。
+# Spec の Non-Goal「KB 記事本文のマスク」を尊重する。
+_MASK_EXEMPT_TOOLS = {
+    "get_kb_article", "search_kb_articles", "list_kb_articles",
+    "list_kb_categories", "list_kb_sections",
+}
+
+
 TOOL_HANDLERS = {
     "search_tickets":     tool_search_tickets,
     "get_ticket":         tool_get_ticket,
@@ -808,15 +872,21 @@ def handle(body: dict) -> dict | None:
             return err(-32601, f"Unknown tool: {name}")
         try:
             result = TOOL_HANDLERS[name](args)
+            if MASK_PII and name not in _MASK_EXEMPT_TOOLS:
+                result = mask_pii_text(result)
             return ok({"content": [{"type": "text", "text": result}]})
         except Exception as e:
-            return err(-32603, str(e))
+            msg = str(e)
+            if MASK_PII:
+                msg = mask_pii_text(msg)
+            return err(-32603, msg)
 
     return err(-32601, f"Method not found: {method}")
 
 
 def main():
     sys.stderr.write("[zendesk-mcp] 起動しました（stdio モード）\n")
+    sys.stderr.write(f"[zendesk-mcp] PII masking: {'ON' if MASK_PII else 'OFF'}\n")
     for line in sys.stdin:
         line = line.strip()
         if not line:
