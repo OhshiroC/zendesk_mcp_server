@@ -1,0 +1,42 @@
+[project]
+name = "zendesk-mcp-server"
+version = "1.1.3"
+description = "Zendesk を Claude から直接操作する MCP サーバー"
+readme = "README.md"
+
+# spaCy 3.8.x に cp314 wheel が存在しないため上限を 3.14 未満にする。
+# Claude Desktop の UV ランタイムは既定でこの範囲の Python を自動取得する
+# （--no-python-downloads はフィーチャーフラグ有効時のみ付与される）。
+requires-python = ">=3.12,<3.14"
+
+# 氏名・住所 redaction の NER 層。
+# サーバ本体は標準ライブラリのみで動作し、これらが無くても縮退モードで起動する。
+#
+# 環境マーカーで Windows arm64 を除外している理由:
+#   spacy / blis / SudachiPy が win_arm64 wheel を提供していないため、そのままだと
+#   インストール時の `uv sync` が失敗し拡張機能のインストール自体が失敗する。
+#   除外しておけば sync は成功し、起動後に縮退モード（自由記述を全て [REDACTED]）
+#   に落ちるだけで済む。
+#   PEP 508 のマーカー文法に `not` は無いためド・モルガンで書いている。
+dependencies = [
+    "spacy>=3.8.0,<3.9.0 ; sys_platform != 'win32' or platform_machine != 'ARM64'",
+    "ja_core_news_md @ https://github.com/explosion/spacy-models/releases/download/ja_core_news_md-3.8.0/ja_core_news_md-3.8.0-py3-none-any.whl ; sys_platform != 'win32' or platform_machine != 'ARM64'",
+    "sudachipy>=0.5.2,!=0.6.1 ; sys_platform != 'win32' or platform_machine != 'ARM64'",
+    "sudachidict-core>=20211220 ; sys_platform != 'win32' or platform_machine != 'ARM64'",
+    # spacy 3.8.14 は spacy/cli/_util.py で `from click import NoSuchOption` を実行するが
+    # click を直接宣言しておらず（Requires-Dist は typer<1.0.0,>=0.3.0 のみ）、
+    # typer 0.27.0 が click 依存を落としたため import が壊れる。明示的に追加する。
+    "click ; sys_platform != 'win32' or platform_machine != 'ARM64'",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+# server.py 単体を実行するアプリケーションであり、配布パッケージではない。
+package = false
+
+# Claude Desktop はインストール時に `uv sync --quiet` を実行する。既定で dev グループが
+# 入ると拡張機能の venv に pytest まで入ってしまうため、既定グループから外す。
+# 開発時は `uv sync --group dev` を使う。
+default-groups = []

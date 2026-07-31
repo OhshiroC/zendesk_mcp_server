@@ -212,7 +212,10 @@ def test_choke_point_bypassed_when_off():
     raw = "電話: 090-1234-5678 / mail: user@example.com"
     with mock.patch.object(server, "MASK_PII", False):
         resp = _call_tool("get_ticket", lambda args: raw)
-    assert resp["result"]["content"][0]["text"] == raw
+    text = resp["result"]["content"][0]["text"]
+    # OFF 時は本文を素通しするが、無効化を知らせる注意文が先頭に付く
+    assert text.endswith(raw)
+    assert text.startswith(server._MASK_OFF_NOTICE)
 
 
 # ── AC-10: エラーパスのマスク ───────────────────────────────
