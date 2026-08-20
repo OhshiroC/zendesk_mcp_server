@@ -6,6 +6,11 @@
 .mcp.json
 dist/
 node_modules/
+tests/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
 *.mcpb
 claude_desktop_config.json
 .env.example

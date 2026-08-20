@@ -1,5 +1,5 @@
 {
-  "manifest_version": "0.3",
+  "manifest_version": "0.4",
   "name": "zendesk-mcp-server",
   "display_name": "Zendesk MCP Server",
   "version": "1.1.0",
@@ -13,11 +13,11 @@
   },
   "keywords": ["zendesk", "mcp", "support", "helpdesk"],
   "server": {
-    "type": "python",
+    "type": "uv",
     "entry_point": "server.py",
     "mcp_config": {
-      "command": "${user_config.python_path}",
-      "args": ["${__dirname}/server.py"],
+      "command": "uv",
+      "args": ["run", "--no-sync", "python", "server.py"],
       "env": {
         "ZENDESK_SUBDOMAIN": "${user_config.zendesk_subdomain}",
         "ZENDESK_EMAIL": "${user_config.zendesk_email}",
@@ -46,17 +46,10 @@
       "sensitive": true,
       "required": true
     },
-    "python_path": {
-      "type": "string",
-      "title": "Python Path",
-      "description": "Python 3.12 以上の実行コマンドまたはフルパス。通常は変更不要。macOS の場合はフルパスの指定を推奨（例: /opt/homebrew/bin/python3）。`which python3` で確認できます",
-      "required": false,
-      "default": "python3"
-    },
     "mask_pii": {
       "type": "boolean",
       "title": "PII マスキング",
-      "description": "Zendesk から取得した個人情報（ユーザー名・メールアドレス・電話番号）を [NAME] / [EMAIL] / [PHONE] に置き換えてから返します。オフにすると生の値がそのまま返ります。",
+      "description": "Zendesk から取得した個人情報をマスクしてから返します。メールアドレス・電話番号は [EMAIL] / [PHONE] に置換、ユーザー名は [NAME]、住所フィールドは [ADDRESS] に置換します。さらに氏名・住所を含む文は文ごと [NAME] / [ADDRESS] に置き換えます（どちらを検出して落としたか識別できます。NER が未導入の環境では自由記述本文をすべて [REDACTED] にする縮退動作）。オフにすると生の値がそのまま LLM へ送信されます（社内規程・顧客との契約に違反する可能性があります）。",
       "required": false,
       "default": true
     }
@@ -64,7 +57,7 @@
   "compatibility": {
     "platforms": ["darwin", "win32", "linux"],
     "runtimes": {
-      "python": ">=3.12"
+      "python": ">=3.12,<3.14"
     }
   }
 }

@@ -84,6 +84,313 @@ def mask_pii_text(text: str) -> str:
     return text
 
 
+# ── 氏名・住所の redaction ────────────────────────────────
+# メール・電話は span 置換で足りるが、氏名・住所は脅威モデルが異なる。
+# 「PII が外部 LLM へ渡ること自体が規程違反(一件の漏れ = 違反)」であるため、
+# 危険と判定した文を丸ごとプレースホルダに置き換える fail-closed redaction を採る。
+#
+# Why not span 置換: 日本語 NER の人名再現率は実データで 90%台前半に留まり、
+# 「一件も漏らさない」要件を span 単位で満たすことは原理的にできない。文単位に
+# 落とせば判定は「危険か否か」の真偽1ビットで足り、境界を外しても漏れない。
+#
+# Why not Precision over Recall: メール・電話は原則 #5「Precision over Recall」に
+# 従うが、氏名・住所についてはこの原則を意図的に反転させている(過剰マスクによる
+# 可読性低下を受容する)。両者で基準が異なるのは意図的。
+
+# 落としたセグメントには「なぜ落としたか(検出種別)」を示すプレースホルダを置く。
+# 文全体を落とす動作は変わらず、[NAME] は「人名を含む文を落とした」という意味。
+# 種別が判定できない縮退時のみ [REDACTED] を使い、両者を区別できるようにする。
+_KIND_NAME = "NAME"
+_KIND_ADDRESS = "ADDRESS"
+_REDACTED = "[REDACTED]"
+_ADDRESS_PLACEHOLDER = f"[{_KIND_ADDRESS}]"
+_NAME_PLACEHOLDER = f"[{_KIND_NAME}]"
+
+# OFF スイッチは残す判断だが、無効化されていることを LLM 側でも認識できるよう
+# 応答先頭に注意文を差し込む。
+_MASK_OFF_NOTICE = (
+    "⚠️ 警告: このサーバは PII マスクが無効(ZENDESK_MASK_PII=0)の状態で動作しています。"
+    "以下の内容には氏名・住所・メール・電話番号が含まれる可能性があります。\n\n"
+)
+
+# 文の区切り。行単位に分けたうえで行内を句点で割ることで改行を跨がせない
+# (既存の電話 regex で \s を避けているのと同じ理由: 行を跨いだ誤結合を防ぐ)。
+_SENTENCE_END_RE = re.compile(r"(?<=[。！？!?])")
+
+_PREFECTURE_RE = re.compile(
+    "北海道|青森県|岩手県|宮城県|秋田県|山形県|福島県|茨城県|栃木県|群馬県|埼玉県|"
+    "千葉県|東京都|神奈川県|新潟県|富山県|石川県|福井県|山梨県|長野県|岐阜県|静岡県|"
+    "愛知県|三重県|滋賀県|京都府|大阪府|兵庫県|奈良県|和歌山県|鳥取県|島根県|岡山県|"
+    "広島県|山口県|徳島県|香川県|愛媛県|高知県|福岡県|佐賀県|長崎県|熊本県|大分県|"
+    "宮崎県|鹿児島県|沖縄県"
+)
+
+# 丁目・番地・郵便番号は単独でも住所と断定できる強いシグナル。
+_ADDRESS_STRONG_RES = [
+    re.compile(r"〒\s*[0-9０-９]{3}[\-‐−ー－]?[0-9０-９]{4}"),
+    re.compile(r"[0-9０-９一二三四五六七八九十]+\s*丁目"),
+    re.compile(r"[0-9０-９]+\s*番地"),
+    re.compile(r"[0-9０-９]+\s*番\s*[0-9０-９]+\s*号"),
+]
+
+# 市区町村名。直前が漢字/カタカナであることを要求して「〜の市場」のような
+# 助詞 + 一般名詞の誤検出を落とす(地名は漢字・カタカナで始まる)。
+_CITY_RE = re.compile(r"[一-龥ヶァ-ヴー]{1,8}?[市区町村][一-龥ヶァ-ヴー0-9０-９]")
+
+# 「1-2-3」「1の2」等の番地形式。
+_HOUSE_NUMBER_RE = re.compile(r"[0-9０-９]{1,4}\s*[\-‐−ー－の]\s*[0-9０-９]{1,4}")
+
+# Why not 「1-2-3」単独で住所とみなさない: 日付(2026-07-28)・バージョン(1-2-3)・
+# 型番と衝突して大半の文が落ちる。かつ地名を伴わない番地は個人を特定しないため、
+# recall 優先の要件下でも実質的な検出漏れにならない。市区町村との共起を要求する。
+
+# 2文字以上の姓は一般名詞との衝突が少ないため単独ヒットで氏名とみなす。
+_SURNAMES_MULTI = (
+    "佐藤|鈴木|高橋|田中|伊藤|渡辺|渡部|山本|中村|小林|加藤|吉田|山田|佐々木|山口|"
+    "松本|井上|木村|斉藤|斎藤|清水|山崎|阿部|池田|橋本|山下|石川|中島|前田|藤田|"
+    "後藤|小川|岡田|村上|長谷川|近藤|石井|坂本|遠藤|藤井|青木|福田|三浦|西村|藤原|"
+    "太田|松田|原田|岡本|中川|中野|小野|田村|竹内|金子|和田|中山|石田|上田|森田|"
+    "柴田|宮崎|酒井|工藤|横山|宮本|内田|高木|安藤|島田|谷口|大野|高田|丸山|今井|"
+    "河野|藤本|村田|武田|上野|杉山|増田|小島|大塚|平野|菅原|久保|松井|千葉|岩崎|"
+    "桜井|木下|野口|松尾|菊地|菊池|野村|新井|佐野|市川|水野|大西|吉川|中田|白石|"
+    "五十嵐|北村|安田|平田|小山|川口|川崎|飯田|星野|大久保|松岡|山内|吉村|熊谷|"
+    "秋山|若林|服部|川上|浅野|西川|大谷|松下|小松|田口|岡崎|成田|早川|荒木|本田|"
+    "青山|中島|西田|吉岡|沢田|小泉|片山|水谷|富田|大島|石原|高山|栗原|今村|望月|"
+    "土屋|野田|岩田|寺田|馬場|浜田|吉本|尾崎|松村|久保田|杉本|吉野|関口|黒田|平井"
+)
+_SURNAME_MULTI_RE = re.compile(_SURNAMES_MULTI)
+
+# 1文字姓は一般名詞と大量に衝突する(森林・関係・東京…)ため、氏名文脈との
+# 共起を必須にする。
+_SURNAME_SINGLE_CONTEXT_RE = re.compile(
+    r"(?:林|森|関|原|辻|東|南|北|宮|岡|堀|沖|巽|柳|樋|畑|栗|桑|藤)"
+    r"(?:です|でございます|より|宛|行\b|様|さん|氏|殿)"
+)
+
+# 敬称つきの呼びかけ。氏名でない定型語は除外する。
+_HONORIFIC_RE = re.compile(r"([一-龥ヶァ-ヴー々]{1,10})(様|さま|さん|氏|殿|くん|君|ちゃん)")
+_HONORIFIC_EXCEPTIONS = {
+    "お客", "客", "皆", "皆々", "奥", "神", "仏", "王", "殿", "貴", "何", "どちら",
+    "担当者", "ご担当", "ご担当者", "御担当者", "責任者", "各", "御", "ご",
+    "母", "父", "兄", "姉", "弟", "妹", "息子", "娘", "主人", "旦那", "嫁",
+    "医者", "業者", "他", "皆さん", "運転手", "配達",
+}
+
+# 自己紹介の定型句。直前に必ず氏名が来るため、句そのものを危険シグナルとする。
+_SELF_INTRO_RE = re.compile(r"と申します|と申しま|と言います|といいます|と名乗")
+
+
+def split_segments(text: str) -> list[str]:
+    """text を文単位に分割する。"".join(結果) == text を満たす純粋関数。
+
+    改行は独立したセグメントとして扱い、redaction で改行が失われないようにする。
+    """
+    segments: list[str] = []
+    for line in text.splitlines(keepends=True):
+        body, newline = line, ""
+        while body and body[-1] in "\r\n":
+            newline = body[-1] + newline
+            body = body[:-1]
+        if body:
+            segments.extend(p for p in _SENTENCE_END_RE.split(body) if p)
+        if newline:
+            segments.append(newline)
+    return segments
+
+
+def segment_has_address(segment: str) -> bool:
+    """セグメントに住所が含まれるかを判定する純粋関数。"""
+    if any(pat.search(segment) for pat in _ADDRESS_STRONG_RES):
+        return True
+    if _PREFECTURE_RE.search(segment):
+        return True
+    return bool(_CITY_RE.search(segment) and _HOUSE_NUMBER_RE.search(segment))
+
+
+def segment_has_person_name(segment: str) -> bool:
+    """セグメントに人名が含まれるかを判定する純粋関数。"""
+    if _SELF_INTRO_RE.search(segment):
+        return True
+    if _SURNAME_MULTI_RE.search(segment):
+        return True
+    if _SURNAME_SINGLE_CONTEXT_RE.search(segment):
+        return True
+    for prefix, _honorific in _HONORIFIC_RE.findall(segment):
+        if prefix not in _HONORIFIC_EXCEPTIONS:
+            return True
+    return False
+
+
+def segment_risk_kinds(segment: str) -> frozenset:
+    """辞書・正規表現で検出した PII 種別を返す純粋関数。空集合なら安全。
+
+    NER の副層として使う。真偽ではなく種別を返すことで、落としたセグメントの
+    プレースホルダに検出理由(人名 / 住所)を反映できる。
+    """
+    kinds = set()
+    if segment_has_person_name(segment):
+        kinds.add(_KIND_NAME)
+    if segment_has_address(segment):
+        kinds.add(_KIND_ADDRESS)
+    return frozenset(kinds)
+
+
+def segment_is_risky_by_rules(segment: str) -> bool:
+    """規則ベースで危険と判定されるかを返す純粋関数。"""
+    return bool(segment_risk_kinds(segment))
+
+
+def placeholder_for_kinds(kinds) -> str:
+    """検出種別からプレースホルダ文字列を組み立てる純粋関数。
+
+    種別不明(縮退時)は [REDACTED]、人名と住所の両方を含む場合は
+    [ADDRESS][NAME] のように連結する。
+    """
+    if not kinds:
+        return _REDACTED
+    return "".join(f"[{kind}]" for kind in sorted(kinds))
+
+
+def redact_free_text(text: str, ner_kinds=None) -> str:
+    """自由記述から氏名・住所を含む文を落とす純粋関数。
+
+    ner_kinds: セグメントを受け取り検出種別の集合を返す callable。
+               None(= NER 利用不可)のときは種別を問わず全セグメントを
+               [REDACTED] に落とす fail-closed 動作。
+    """
+    if not text:
+        return text
+    out: list[str] = []
+    for seg in split_segments(text):
+        if not seg.strip():
+            out.append(seg)
+            continue
+        if ner_kinds is None:
+            placeholder = _REDACTED
+        else:
+            kinds = segment_risk_kinds(seg) | frozenset(ner_kinds(seg))
+            if not kinds:
+                out.append(seg)
+                continue
+            placeholder = placeholder_for_kinds(kinds)
+        # 同じプレースホルダが連続する場合は 1 個に畳んで可読性を保つ。
+        if not (out and out[-1] == placeholder):
+            out.append(placeholder)
+    return "".join(out)
+
+
+# ── NER 層(任意依存 / Imperative Shell) ──────────────────
+# spaCy の日本語モデルが利用できる場合のみ第1層として使う。利用できない環境では
+# ner_check=None となり、自由記述は全落としされる(fail-closed 縮退)。
+
+# 対応モデルは spaCy 公式の日本語パイプライン ja_core_news_{lg,md,sm} のみ。
+# 精度の高い順に探索し、最初に読めたものを使う。推奨は md
+# (ents_f 0.7043 / recall 0.6755 / 40MB。lg は 530MB で +0.018 しか伸びない)。
+#
+# Why not ja_ginza: パッケージは MIT 宣言だが、wheel 内 meta.json の sources に
+# 学習元として UD_Japanese-BCCWJ (CC BY-NC-SA 4.0) と GSK2014-A(個別に定める
+# 商用ライセンス) が記載されている。NC は再配布だけでなく商用利用自体を制限する
+# ため、業務利用および .mcpb への同梱配布に適さない。探索順から意図的に除外する。
+# ja_core_news_{md,lg} は ja_ginza と同一の chiVe ベクトル
+# (chive-1.1-mc90-500k / 300次元 / 480,443キー)を使うため、未知語(珍しい姓・
+# 難読地名)への一般化能力は同等。ライセンスは CC BY-SA 4.0 で NC 制限がない。
+_NER_MODELS = ("ja_core_news_lg", "ja_core_news_md", "ja_core_news_sm")
+
+# ラベル集合は上記モデルが実際に出力する 22 ラベルに対して監査済み。
+# ja_core_news_* の全ラベル:
+#   CARDINAL DATE EVENT FAC GPE LANGUAGE LAW LOC MONEY MOVEMENT NORP ORDINAL
+#   ORG PERCENT PERSON PET_NAME PHONE PRODUCT QUANTITY TIME TITLE_AFFIX WORK_OF_ART
+#
+# Why not ORG / NORP: 本機能のスコープは氏名・住所であり、法人名・国籍/民族は
+# 対象外(spec の Non-Goal)。PHONE / DATE 等は既存の span マスクと規則層が扱う。
+# Why not ja_ginza のラベル名(GPE_Other, Facility_Other, Country, Region_Other …):
+# ja_ginza は 189 ラベルあり全列挙の監査が現実的でない。22 ラベルに限定することで
+# 「拾い漏れているラベルがないか」を確実に検証できる(テストで固定している)。
+_NER_PERSON_LABELS = {"PERSON"}
+_NER_LOCATION_LABELS = {"GPE", "LOC", "FAC"}
+
+_NER_STATE: dict = {"nlp": None, "loaded": False, "reason": ""}
+
+
+def _load_ner():
+    """spaCy と日本語モデルを遅延ロードする（Imperative Shell）。
+
+    依存は実行中のインタプリタから import するだけで、パス操作は行わない。
+    .mcpb 配布では Claude Desktop の UV ランタイムがインストール時に
+    `uv sync` で venv を作り、`uv run` でその venv から起動する
+    （manifest.json の server.type = "uv"）。手動実行の場合は
+    requirements-ner.txt を pip install した環境で起動する。
+    """
+    if _NER_STATE["loaded"]:
+        return _NER_STATE["nlp"]
+    _NER_STATE["loaded"] = True
+    try:
+        import spacy
+    except ImportError:
+        _NER_STATE["reason"] = (
+            f"spacy が import できません (python {sys.version.split()[0]})"
+        )
+        return None
+    for model in _NER_MODELS:
+        try:
+            _NER_STATE["nlp"] = spacy.load(model)
+            _NER_STATE["reason"] = f"model={model}"
+            return _NER_STATE["nlp"]
+        except Exception:
+            continue
+    _NER_STATE["reason"] = f"モデル未導入 (候補: {', '.join(_NER_MODELS)})"
+    return None
+
+
+def ner_available() -> bool:
+    return _load_ner() is not None
+
+
+def _ner_segment_kinds(segment: str) -> frozenset:
+    """NER が検出したエンティティを PII 種別に写す。"""
+    nlp = _load_ner()
+    if nlp is None:
+        # 呼ばれない想定。万一呼ばれても安全側(両種別あり)に倒す。
+        return frozenset({_KIND_NAME, _KIND_ADDRESS})
+    kinds = set()
+    for ent in nlp(segment).ents:
+        if ent.label_ in _NER_PERSON_LABELS:
+            kinds.add(_KIND_NAME)
+        elif ent.label_ in _NER_LOCATION_LABELS:
+            kinds.add(_KIND_ADDRESS)
+    return frozenset(kinds)
+
+
+def mask_free_text(text: str) -> str:
+    """ツール実装から呼ぶ入口。ON/OFF と NER 可用性の判定を担う。"""
+    if not MASK_PII:
+        return text
+    check = _ner_segment_kinds if ner_available() else None
+    return redact_free_text(text, check)
+
+
+# 住所を含みうるユーザーカスタムフィールドのキー名。
+_ADDRESS_FIELD_KEY_RE = re.compile(
+    r"addr|address|zip|postal|pref|city|town|street|building|room|"
+    r"住所|郵便|都道府県|市区町村|番地|建物|部屋|所在地",
+    re.IGNORECASE,
+)
+
+
+def mask_user_field(key: str, value) -> str:
+    """ユーザーカスタムフィールドをフィールド単位でマスクする。"""
+    if not MASK_PII:
+        return str(value)
+    if _ADDRESS_FIELD_KEY_RE.search(key):
+        return _ADDRESS_PLACEHOLDER
+    # Why not fail-closed: user_fields は自由記述本文ではなく構造化フィールドで、
+    # 実際にはプラン名・OS バージョン等の運用上必要な短い値が入る。NER 不在時に
+    # 全落としすると get_user が実質使えなくなるため、ここは規則ベース判定のみ
+    # 適用する(住所系キーは上で [ADDRESS] に置換済み)。
+    check = _ner_segment_kinds if ner_available() else (lambda _segment: frozenset())
+    return redact_free_text(str(value), check)
+
+
 # ── Zendesk API ヘルパー ──────────────────────────────────
 
 def _auth() -> str:
@@ -425,7 +732,8 @@ def tool_search_tickets(args: dict) -> str:
     for t in tickets:
         assignee_id  = t.get("assignee_id", "")
         requester_id = t.get("requester_id", "")
-        lines.append(f"[#{t['id']}] {t['subject']} | {t['status']} | requester_id: {requester_id} | 担当者ID: {assignee_id} | 作成: {t['created_at'][:10]} | タグ: {','.join(t.get('tags',[]))}")
+        subject = mask_free_text(t.get("subject") or "")
+        lines.append(f"[#{t['id']}] {subject} | {t['status']} | requester_id: {requester_id} | 担当者ID: {assignee_id} | 作成: {t['created_at'][:10]} | タグ: {','.join(t.get('tags',[]))}")
     return "\n".join(lines) + _remaining_msg(remaining)
 
 
@@ -434,7 +742,7 @@ def tool_get_ticket(args: dict) -> str:
     t    = zd_get(f"/tickets/{tid}.json")["ticket"]
     cmts = zd_get(f"/tickets/{tid}/comments.json")["comments"]
     lines = [
-        f"# チケット #{tid}: {t['subject']}",
+        f"# チケット #{tid}: {mask_free_text(t.get('subject') or '')}",
         f"ステータス: {t['status']} | 優先度: {t.get('priority','なし')}",
         f"作成: {t['created_at'][:10]} | 更新: {t['updated_at'][:10]}",
         f"requester_id: {t.get('requester_id','なし')} | assignee_id: {t.get('assignee_id','なし')}",
@@ -443,7 +751,8 @@ def tool_get_ticket(args: dict) -> str:
     ]
     for c in cmts:
         author = "顧客" if c["author_id"] == t["requester_id"] else "エージェント"
-        lines.append(f"\n[{author} / {c['created_at'][:10]}]\n{c['body'][:800]}")
+        body = mask_free_text((c.get("body") or "")[:800])
+        lines.append(f"\n[{author} / {c['created_at'][:10]}]\n{body}")
     return "\n".join(lines)
 
 
@@ -485,7 +794,8 @@ def tool_list_tickets(args: dict) -> str:
         lines = [f"チケット一覧（{status}）: {len(tickets)} 件\n"]
 
     for t in tickets:
-        lines.append(f"[#{t['id']}] {t['subject']} | 更新: {t['updated_at'][:10]} | タグ: {','.join(t.get('tags',[]))}")
+        subject = mask_free_text(t.get("subject") or "")
+        lines.append(f"[#{t['id']}] {subject} | 更新: {t['updated_at'][:10]} | タグ: {','.join(t.get('tags',[]))}")
     return "\n".join(lines) + _remaining_msg(remaining)
 
 
@@ -509,10 +819,10 @@ def tool_suggest_reply(args: dict) -> str:
     conv_history = []
     for c in cmts[-6:]:
         role = "顧客" if c["author_id"] == t["requester_id"] else "エージェント"
-        conv_history.append(f"[{role}] {c['body'][:300]}")
+        conv_history.append(f"[{role}] {mask_free_text((c.get('body') or '')[:300])}")
     return (
         f"## 返信案生成コンテキスト\n\n"
-        f"**件名**: {t['subject']}\n"
+        f"**件名**: {mask_free_text(t.get('subject') or '')}\n"
         f"**ステータス**: {t['status']} | **優先度**: {t.get('priority','なし')}\n"
         f"**タグ**: {', '.join(t.get('tags',[]))}\n\n"
         f"### 会話履歴（直近）\n" + "\n\n".join(conv_history) + "\n\n"
@@ -685,13 +995,14 @@ def tool_get_csat_rating(args: dict) -> str:
     t     = zd_get(f"/tickets/{tid}.json")["ticket"]
     lines = [
         f"# チケット #{tid} のCSAT評価",
-        f"件名: {t['subject']}",
+        f"件名: {mask_free_text(t.get('subject') or '')}",
         f"評価: {parsed.get('rating_category','?')}（スコア: {parsed.get('rating','?')}）",
     ]
     if parsed.get("bad_reason"):
         lines.append(f"bad理由: {parsed['bad_reason']}")
+    comment = parsed.get("comment")
     lines += [
-        f"コメント: {parsed.get('comment') or '（コメントなし）'}",
+        f"コメント: {mask_free_text(comment) if comment else '（コメントなし）'}",
         f"評価日時: {parsed.get('created_at','?')}",
     ]
     return "\n".join(lines)
@@ -719,7 +1030,9 @@ def tool_get_user(args: dict) -> str:
     cf_lines = []
     for k, v in custom_fields.items():
         if v not in (None, "", []):
-            cf_lines.append(f"  {k}: {v}")
+            # カスタムフィールドは自由記述なので、住所系キーは [ADDRESS]、
+            # それ以外は自由記述と同じ redaction を通す。
+            cf_lines.append(f"  {k}: {mask_user_field(k, v)}")
 
     # 名前・メールは構造フィールドの PII。regex では人名を検出できないため、
     # ここでフィールド単位でプレースホルダに差し替える(ON/OFF は MASK_PII で制御)。
@@ -874,6 +1187,8 @@ def handle(body: dict) -> dict | None:
             result = TOOL_HANDLERS[name](args)
             if MASK_PII and name not in _MASK_EXEMPT_TOOLS:
                 result = mask_pii_text(result)
+            if not MASK_PII:
+                result = _MASK_OFF_NOTICE + result
             return ok({"content": [{"type": "text", "text": result}]})
         except Exception as e:
             msg = str(e)
@@ -887,6 +1202,20 @@ def handle(body: dict) -> dict | None:
 def main():
     sys.stderr.write("[zendesk-mcp] 起動しました（stdio モード）\n")
     sys.stderr.write(f"[zendesk-mcp] PII masking: {'ON' if MASK_PII else 'OFF'}\n")
+    if not MASK_PII:
+        # OFF スイッチは残す判断だが、監査上の抜け穴になりうるため警告を強く出す。
+        sys.stderr.write(
+            "[zendesk-mcp] *** 警告: ZENDESK_MASK_PII=0 により PII マスクが無効です ***\n"
+            "[zendesk-mcp] *** 氏名・住所・メール・電話番号がそのまま LLM へ送信されます ***\n"
+            "[zendesk-mcp] *** 社内規程・顧客との契約に違反する可能性があります ***\n"
+        )
+    elif ner_available():
+        sys.stderr.write(f"[zendesk-mcp] 氏名・住所 redaction: NER 有効 ({_NER_STATE['reason']})\n")
+    else:
+        sys.stderr.write(
+            f"[zendesk-mcp] 氏名・住所 redaction: NER 利用不可 ({_NER_STATE['reason']}) — "
+            "縮退運転(自由記述は全て [REDACTED])\n"
+        )
     for line in sys.stdin:
         line = line.strip()
         if not line:
