@@ -174,7 +174,7 @@ TOOLS = [
     },
     {
         "name": "get_ticket",
-        "description": "チケットIDを指定して詳細情報とコメント一覧を取得する",
+        "description": "チケットIDを指定して詳細情報・カスタムフィールド・コメント一覧を取得する",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -429,6 +429,45 @@ def tool_search_tickets(args: dict) -> str:
     return "\n".join(lines) + _remaining_msg(remaining)
 
 
+# ── チケットフィールド名の解決 ────────────────────────────
+
+_TICKET_FIELD_TITLES: dict[int, str] | None = None
+
+
+def _ticket_field_titles() -> dict[int, str]:
+    """カスタムフィールド id -> 表示名。初回のみ API を叩いてプロセス内にキャッシュ。"""
+    global _TICKET_FIELD_TITLES
+    if _TICKET_FIELD_TITLES is None:
+        try:
+            fields = zd_get("/ticket_fields.json").get("ticket_fields", [])
+            _TICKET_FIELD_TITLES = {f["id"]: f.get("title", "") for f in fields}
+        except Exception:
+            _TICKET_FIELD_TITLES = {}
+    return _TICKET_FIELD_TITLES
+
+
+# 人名を保持するカスタムフィールド。regex では人名を検出できないため、
+# get_user と同様にフィールド単位でプレースホルダに差し替える。
+_NAME_FIELD_TITLES = ("名前", "氏名", "お名前")
+
+
+def _format_custom_fields(t: dict) -> list[str]:
+    """値が入っているカスタムフィールドだけを「表示名: 値」の行にする。"""
+    titles = _ticket_field_titles()
+    rows = []
+    for cf in t.get("custom_fields") or []:
+        v = cf.get("value")
+        if v is None or v == "" or v is False or v == []:
+            continue
+        if isinstance(v, list):
+            v = ", ".join(str(x) for x in v)
+        title = titles.get(cf.get("id")) or f"field_{cf.get('id')}"
+        if MASK_PII and title in _NAME_FIELD_TITLES:
+            v = "[NAME]"
+        rows.append(f"- {title}: {v}")
+    return rows
+
+
 def tool_get_ticket(args: dict) -> str:
     tid  = args["ticket_id"]
     t    = zd_get(f"/tickets/{tid}.json")["ticket"]
@@ -439,8 +478,11 @@ def tool_get_ticket(args: dict) -> str:
         f"作成: {t['created_at'][:10]} | 更新: {t['updated_at'][:10]}",
         f"requester_id: {t.get('requester_id','なし')} | assignee_id: {t.get('assignee_id','なし')}",
         f"タグ: {', '.join(t.get('tags',[])) or 'なし'}",
-        "", "## コメント",
     ]
+    cf_rows = _format_custom_fields(t)
+    if cf_rows:
+        lines += ["", "## カスタムフィールド"] + cf_rows
+    lines += ["", "## コメント"]
     for c in cmts:
         author = "顧客" if c["author_id"] == t["requester_id"] else "エージェント"
         lines.append(f"\n[{author} / {c['created_at'][:10]}]\n{c['body'][:800]}")
