@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "zendesk-mcp-server",
   "display_name": "Zendesk MCP Server",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "description": "Zendesk を Claude から直接操作する MCP サーバー（チケット・ナレッジベース・ユーザー・CSAT の15ツール）",
   "author": {
     "name": "OhshiroC"

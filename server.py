@@ -1405,7 +1405,7 @@ def handle(body: dict) -> dict | None:
         return ok({
             "protocolVersion": "2024-11-05",
             "capabilities":    {"tools": {}},
-            "serverInfo":      {"name": "zendesk-mcp", "version": "1.1.0"},
+            "serverInfo":      {"name": "zendesk-mcp", "version": "2.0.0"},
         })
 
     if method == "notifications/initialized":
