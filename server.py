@@ -8,8 +8,10 @@ Zendesk MCP Server（ローカル実行版）
 
 環境変数:
   ZENDESK_SUBDOMAIN
-  ZENDESK_EMAIL
-  ZENDESK_API_TOKEN  Zendesk 管理画面で発行したAPIトークン
+  ZENDESK_OAUTH_CLIENT_ID      Zendesk で作成した OAuth クライアント(public)の識別子
+  ZENDESK_OAUTH_SCOPES         任意。既定 "read write"
+  ZENDESK_OAUTH_REDIRECT_PORT  任意。既定 47823 (リダイレクト URL http://127.0.0.1:<port>/callback)
+  ZENDESK_OAUTH_TOKEN_CACHE    任意。トークンの保存先 (既定 ~/.config/zendesk-mcp/token-<subdomain>.json)
 """
 
 import json
@@ -18,8 +20,16 @@ import re
 import sys
 import ssl
 import base64
+import hashlib
+import html
+import http.server
+import secrets
+import threading
+import time
+import urllib.error
 import urllib.request
 import urllib.parse
+import webbrowser
 from datetime import datetime, timezone
 
 # SSL コンテキスト
@@ -28,9 +38,12 @@ _SSL_CTX = ssl._create_unverified_context()
 
 # ── 環境変数 ──────────────────────────────────────────────
 ZENDESK_SUBDOMAIN = os.environ.get("ZENDESK_SUBDOMAIN", "")
-ZENDESK_EMAIL     = os.environ.get("ZENDESK_EMAIL", "")
-ZENDESK_API_TOKEN = os.environ.get("ZENDESK_API_TOKEN", "")
 ZENDESK_BASE      = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2"
+
+ZENDESK_OAUTH_CLIENT_ID     = os.environ.get("ZENDESK_OAUTH_CLIENT_ID", "")
+ZENDESK_OAUTH_SCOPES        = os.environ.get("ZENDESK_OAUTH_SCOPES") or "read write"
+ZENDESK_OAUTH_REDIRECT_PORT = int(os.environ.get("ZENDESK_OAUTH_REDIRECT_PORT") or 47823)
+ZENDESK_OAUTH_TOKEN_CACHE   = os.environ.get("ZENDESK_OAUTH_TOKEN_CACHE", "")
 
 
 # ── PII マスキング ────────────────────────────────────────
@@ -391,42 +404,270 @@ def mask_user_field(key: str, value) -> str:
     return redact_free_text(str(value), check)
 
 
+# ── OAuth 認証 ────────────────────────────────────────────
+# Zendesk の OAuth クライアント(public / PKCE)で Authorization Code Grant を行う。
+# 初回のツール呼び出し時にブラウザで認可画面を開き、127.0.0.1 のコールバックで
+# 認可コードを受け取ってトークンに交換する。トークンはローカルにキャッシュし、
+# 期限切れ時は refresh token で自動更新する(refresh token は使い捨てなので毎回保存し直す)。
+
+ZENDESK_OAUTH_URL = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/oauth"
+_REDIRECT_URI     = f"http://127.0.0.1:{ZENDESK_OAUTH_REDIRECT_PORT}/callback"
+
+# 認可待ちでツール呼び出しをブロックする上限秒数。MCP クライアント側のタイムアウトより
+# 短くし、間に合わなければ案内文を返す(コールバック待ちはバックグラウンドで継続する)。
+_AUTH_WAIT_SECONDS     = 45
+_AUTH_CALLBACK_TIMEOUT = 300
+# 期限ぎりぎりのトークンで失敗しないよう、残り時間がこれを切ったら更新する。
+_TOKEN_REFRESH_MARGIN  = 60
+
+
+class AuthRequired(Exception):
+    """ユーザーのブラウザ操作が必要で、トークンをまだ用意できない状態。"""
+
+
+def _token_cache_path() -> str:
+    if ZENDESK_OAUTH_TOKEN_CACHE:
+        return ZENDESK_OAUTH_TOKEN_CACHE
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "zendesk-mcp", f"token-{ZENDESK_SUBDOMAIN}.json")
+
+
+def _load_token() -> dict | None:
+    try:
+        with open(_token_cache_path(), encoding="utf-8") as f:
+            token = json.load(f)
+    except (OSError, ValueError):
+        return None
+    # クライアントを差し替えたら古いトークンは使わない
+    if token.get("client_id") != ZENDESK_OAUTH_CLIENT_ID:
+        return None
+    return token
+
+
+def _save_token(token: dict) -> None:
+    path = _token_cache_path()
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(token, f)
+    os.replace(tmp, path)
+
+
+def _delete_token() -> None:
+    try:
+        os.remove(_token_cache_path())
+    except OSError:
+        pass
+
+
+def _token_request(params: dict) -> dict:
+    """/oauth/tokens を叩き、キャッシュ用に期限を絶対時刻へ変換して返す。"""
+    data = urllib.parse.urlencode({**params, "client_id": ZENDESK_OAUTH_CLIENT_ID}).encode()
+    req  = urllib.request.Request(
+        f"{ZENDESK_OAUTH_URL}/tokens", data=data, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
+        body = json.loads(resp.read())
+    now = time.time()
+    token = {
+        "client_id":     ZENDESK_OAUTH_CLIENT_ID,
+        "access_token":  body["access_token"],
+        "refresh_token": body.get("refresh_token"),
+        "scope":         body.get("scope"),
+    }
+    if body.get("expires_in"):
+        token["expires_at"] = now + int(body["expires_in"])
+    if body.get("refresh_token_expires_in"):
+        token["refresh_expires_at"] = now + int(body["refresh_token_expires_in"])
+    return token
+
+
+def _refresh(token: dict) -> dict | None:
+    rt = token.get("refresh_token")
+    if not rt:
+        return None
+    if token.get("refresh_expires_at") and token["refresh_expires_at"] <= time.time():
+        return None
+    try:
+        new_token = _token_request({"grant_type": "refresh_token", "refresh_token": rt})
+    except urllib.error.HTTPError as e:
+        # invalid_grant 等。refresh token が失効しているので再認可に回す
+        sys.stderr.write(f"[zendesk-mcp] トークン更新に失敗しました (HTTP {e.code})。再認可が必要です\n")
+        _delete_token()
+        return None
+    _save_token(new_token)
+    return new_token
+
+
+class _PendingAuth:
+    """進行中のブラウザ認可 1 件分。コールバックサーバーはバックグラウンドで動く。"""
+
+    def __init__(self):
+        self.state    = secrets.token_urlsafe(32)
+        self.verifier = secrets.token_urlsafe(64)
+        challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(self.verifier.encode()).digest()
+        ).decode().rstrip("=")
+        self.authorize_url = f"{ZENDESK_OAUTH_URL}/authorizations/new?" + urllib.parse.urlencode({
+            "response_type":         "code",
+            "client_id":             ZENDESK_OAUTH_CLIENT_ID,
+            "redirect_uri":          _REDIRECT_URI,
+            "scope":                 ZENDESK_OAUTH_SCOPES,
+            "state":                 self.state,
+            "code_challenge":        challenge,
+            "code_challenge_method": "S256",
+        })
+        self.done   = threading.Event()
+        self.error: str | None = None
+        self.token: dict | None = None
+
+        pending = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                url = urllib.parse.urlparse(self.path)
+                if url.path != "/callback":
+                    self.send_error(404)
+                    return
+                q = urllib.parse.parse_qs(url.query)
+                if q.get("state", [""])[0] != pending.state:
+                    # 別タブ等からの不正なリクエストは無視し、正規のコールバックを待ち続ける
+                    self._reply(400, "state が一致しません。Claude からもう一度やり直してください。")
+                    return
+                if "error" in q:
+                    pending.error = q.get("error_description", q["error"])[0]
+                    self._reply(400, f"認可が拒否されました: {pending.error}")
+                elif "code" in q:
+                    try:
+                        pending.token = _token_request({
+                            "grant_type":    "authorization_code",
+                            "code":          q["code"][0],
+                            "redirect_uri":  _REDIRECT_URI,
+                            "code_verifier": pending.verifier,
+                            "scope":         ZENDESK_OAUTH_SCOPES,
+                        })
+                        _save_token(pending.token)
+                        self._reply(200, "Zendesk の認可が完了しました。このタブを閉じて Claude に戻ってください。")
+                    except Exception as e:
+                        pending.error = f"トークン交換に失敗しました: {e}"
+                        self._reply(500, pending.error)
+                else:
+                    self._reply(400, "認可コードがありません。")
+                    return
+                pending.done.set()
+
+            def _reply(self, status: int, message: str):
+                body = f"<!doctype html><meta charset=utf-8><title>Zendesk MCP</title><p>{html.escape(message)}</p>"
+                self.send_response(status)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def log_message(self, *args):
+                # stdout は MCP の JSON-RPC 専用なので、アクセスログは出さない
+                pass
+
+        # 127.0.0.1 のみで待ち受ける(他ホストから認可コードを送り込まれないように)
+        self.server = http.server.HTTPServer(("127.0.0.1", ZENDESK_OAUTH_REDIRECT_PORT), Handler)
+        self.server.timeout = 1
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        deadline = time.time() + _AUTH_CALLBACK_TIMEOUT
+        while not self.done.is_set() and time.time() < deadline:
+            self.server.handle_request()
+        if not self.done.is_set():
+            self.error = "認可の待ち時間が切れました"
+            self.done.set()
+        self.server.server_close()
+
+
+_token_lock = threading.Lock()
+_pending_auth: _PendingAuth | None = None
+
+
+def _start_or_get_pending_auth() -> _PendingAuth:
+    global _pending_auth
+    if _pending_auth is None or (_pending_auth.done.is_set() and _pending_auth.token is None):
+        try:
+            _pending_auth = _PendingAuth()
+        except OSError as e:
+            raise RuntimeError(
+                f"OAuth コールバック用のポート {ZENDESK_OAUTH_REDIRECT_PORT} を開けません ({e})。"
+                "ZENDESK_OAUTH_REDIRECT_PORT で別のポートを指定し、Zendesk の OAuth クライアントの"
+                "リダイレクト URL も合わせて変更してください。"
+            ) from e
+        sys.stderr.write(f"[zendesk-mcp] ブラウザで Zendesk の認可を行ってください: {_pending_auth.authorize_url}\n")
+        try:
+            webbrowser.open(_pending_auth.authorize_url)
+        except Exception:
+            pass
+    return _pending_auth
+
+
+def _get_access_token(force_refresh: bool = False) -> str:
+    global _pending_auth
+    with _token_lock:
+        token = _load_token()
+        if token:
+            expires_at = token.get("expires_at")
+            if not force_refresh and (not expires_at or expires_at - _TOKEN_REFRESH_MARGIN > time.time()):
+                return token["access_token"]
+            token = _refresh(token)
+            if token:
+                return token["access_token"]
+
+        pending = _start_or_get_pending_auth()
+
+    pending.done.wait(_AUTH_WAIT_SECONDS)
+    with _token_lock:
+        if pending.token:
+            _pending_auth = None
+            return pending.token["access_token"]
+        if pending.done.is_set():
+            raise AuthRequired(f"Zendesk の認可に失敗しました: {pending.error}。もう一度実行すると認可をやり直します。")
+        raise AuthRequired(
+            "Zendesk の OAuth 認可が必要です。ブラウザで開いた認可画面で「許可」を押してから、"
+            "もう一度実行してください。ブラウザが開かない場合は次の URL を開いてください:\n"
+            f"{pending.authorize_url}"
+        )
+
+
 # ── Zendesk API ヘルパー ──────────────────────────────────
 
-def _auth() -> str:
-    cred = f"{ZENDESK_EMAIL}/token:{ZENDESK_API_TOKEN}"
-    return "Basic " + base64.b64encode(cred.encode()).decode()
+def zd_request(url: str, method: str = "GET", payload: dict | None = None,
+               timeout: int = 20) -> dict:
+    """Bearer トークン付きで Zendesk API を呼ぶ。401 のときは 1 度だけトークンを更新して再試行する。"""
+    data = json.dumps(payload).encode() if payload is not None else None
+    for attempt in range(2):
+        headers = {"Authorization": f"Bearer {_get_access_token(force_refresh=attempt > 0)}"}
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code != 401 or attempt > 0:
+                raise
+    raise AssertionError("unreachable")
 
 
 def zd_get(path: str, params: dict | None = None) -> dict:
     url = f"{ZENDESK_BASE}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"Authorization": _auth()})
-    with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
-        return json.loads(resp.read())
+    return zd_request(url)
 
 
 def zd_post(path: str, payload: dict) -> dict:
-    url  = f"{ZENDESK_BASE}{path}"
-    data = json.dumps(payload).encode()
-    req  = urllib.request.Request(
-        url, data=data, method="POST",
-        headers={"Authorization": _auth(), "Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
-        return json.loads(resp.read())
+    return zd_request(f"{ZENDESK_BASE}{path}", "POST", payload)
 
 
 def zd_put(path: str, payload: dict) -> dict:
-    url  = f"{ZENDESK_BASE}{path}"
-    data = json.dumps(payload).encode()
-    req  = urllib.request.Request(
-        url, data=data, method="PUT",
-        headers={"Authorization": _auth(), "Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
-        return json.loads(resp.read())
+    return zd_request(f"{ZENDESK_BASE}{path}", "PUT", payload)
 
 
 def zd_get_all(path: str, result_key: str, params: dict | None = None,
@@ -668,9 +909,7 @@ def zd_search_export(query: str, max_total: int = 10000) -> tuple[list, int | No
 
     while True:
         url = f"{ZENDESK_BASE}/search/export.json?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers={"Authorization": _auth()})
-        with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
-            data = json.loads(resp.read())
+        data = zd_request(url, timeout=30)
 
         page_items = data.get("results", [])
         items     += page_items
@@ -964,16 +1203,12 @@ def _zd_get_survey_responses_page(params: dict) -> dict:
     url = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/guide/survey_responses"
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"Authorization": _auth()})
-    with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
-        return json.loads(resp.read())
+    return zd_request(url)
 
 
 def _get_survey_response_detail(sr_id: str, locale: str = "ja") -> dict:
     url = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/guide/{locale}/survey_responses/{sr_id}"
-    req = urllib.request.Request(url, headers={"Authorization": _auth()})
-    with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
-        return json.loads(resp.read()).get("survey_response", {})
+    return zd_request(url).get("survey_response", {})
 
 
 def tool_get_csat_rating(args: dict) -> str:
@@ -1164,8 +1399,8 @@ def handle(body: dict) -> dict | None:
         return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": msg}}
 
     if method == "initialize":
-        if not all([ZENDESK_SUBDOMAIN, ZENDESK_EMAIL, ZENDESK_API_TOKEN]):
-            sys.stderr.write("[ERROR] 環境変数 ZENDESK_SUBDOMAIN / ZENDESK_EMAIL / ZENDESK_API_TOKEN が未設定です\n")
+        if not all([ZENDESK_SUBDOMAIN, ZENDESK_OAUTH_CLIENT_ID]):
+            sys.stderr.write("[ERROR] 環境変数 ZENDESK_SUBDOMAIN / ZENDESK_OAUTH_CLIENT_ID が未設定です\n")
         return ok({
             "protocolVersion": "2024-11-05",
             "capabilities":    {"tools": {}},
@@ -1190,6 +1425,9 @@ def handle(body: dict) -> dict | None:
             if not MASK_PII:
                 result = _MASK_OFF_NOTICE + result
             return ok({"content": [{"type": "text", "text": result}]})
+        except AuthRequired as e:
+            # 利用者に認可 URL を見せたいので、JSON-RPC エラーではなくツールのエラー結果として返す
+            return ok({"content": [{"type": "text", "text": str(e)}], "isError": True})
         except Exception as e:
             msg = str(e)
             if MASK_PII:
