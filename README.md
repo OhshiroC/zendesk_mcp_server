@@ -49,21 +49,49 @@ Claude Desktop の UV ランタイムが Python ごと自動で用意するた�
 
 ## セットアップ
 
-### 1. Zendesk APIトークンを発行
+### 1. Zendesk に OAuth クライアントを作成（管理者が一度だけ）
 
-**発行場所:**
-Zendesk管理画面 → Apps and integrations → APIs → Zendesk API → Add API token
+認証は OAuth（Authorization Code + PKCE）です。利用者はそれぞれ自分の Zendesk アカウントで
+ログインして認可するため、API トークンを配布する必要はありません。操作は利用者本人の権限で行われます。
 
-### 2. 認証情報を環境変数に設定
+**作成場所:**
+Zendesk 管理画面 → アプリおよびインテグレーション → API → OAuth クライアント → OAuth クライアントを追加
 
-3つの環境変数を shell の設定（`~/.zshrc` / `~/.bashrc` / direnv など）に追加します。
-プラグインはこれらの値を保持せず、起動時に環境変数から読み込みます。
+| 項目 | 設定値 |
+|---|---|
+| クライアントの種類 | **パブリック**（シークレットを持たず PKCE で保護） |
+| 識別子 | 任意（例: `zendesk_mcp`）。これが `ZENDESK_OAUTH_CLIENT_ID` になります |
+| リダイレクト URL | `http://127.0.0.1:47823/callback` |
+| 許可されるスコープ | `read` と `write`（KB 記事の作成・更新に write が必要） |
+
+### 2. 設定を環境変数に設定
+
+2つの環境変数を shell の設定（`~/.zshrc` / `~/.bashrc` / direnv など）に追加します。
+どちらも秘密情報ではありません。
 
 ```sh
 export ZENDESK_SUBDOMAIN="yoursubdomain"
-export ZENDESK_EMAIL="you@example.com"
-export ZENDESK_API_TOKEN="xxxxxxxxxxxxxxxxxxx"
+export ZENDESK_OAUTH_CLIENT_ID="zendesk_mcp"
 ```
+
+**初回の認可**
+
+最初にツールを実行するとブラウザで Zendesk の認可画面が開きます。ログインして「許可」を押すと
+トークンが保存され、そのままツールが実行されます（約45秒以内に完了しなかった場合は、許可した後に
+もう一度実行してください。ブラウザが開かない場合は、ツールの応答に表示される URL を開きます）。
+
+- トークンは `~/.config/zendesk-mcp/token-<subdomain>.json`（パーミッション 600）に保存されます。
+- アクセストークンの期限が切れると refresh token で自動更新します。refresh token も失効した場合
+  （既定で 30 日間未使用など）は、再びブラウザでの認可を求めます。
+- 認可をやり直したい場合はこのファイルを削除します。
+
+**任意の環境変数**
+
+| 変数 | 既定値 | 用途 |
+|---|---|---|
+| `ZENDESK_OAUTH_SCOPES` | `read write` | 要求するスコープ。読み取り専用で使うなら `read` |
+| `ZENDESK_OAUTH_REDIRECT_PORT` | `47823` | コールバックを待ち受けるポート。変える場合は OAuth クライアントのリダイレクト URL も合わせて変更 |
+| `ZENDESK_OAUTH_TOKEN_CACHE` | `~/.config/zendesk-mcp/token-<subdomain>.json` | トークンの保存先 |
 
 #### PII マスキング（任意）
 
@@ -228,8 +256,7 @@ Claude Code で以下を実行します。
       "args": ["/Users/ユーザー名/mcp-servers/zendesk/server.py"],
       "env": {
         "ZENDESK_SUBDOMAIN": "yoursubdomain",
-        "ZENDESK_EMAIL": "you@example.com",
-        "ZENDESK_API_TOKEN": "xxxxxxxxxxxxxxxxxxx"
+        "ZENDESK_OAUTH_CLIENT_ID": "your_oauth_client_identifier"
       }
     }
   }
@@ -242,7 +269,7 @@ Claude Code で以下を実行します。
 #### 方法C: .mcpb バンドル（Claude Desktop 拡張機能）
 
 `.mcpb` バンドルをビルドすると、Claude Desktop の拡張機能としてワンクリックでインストールでき、
-Zendesk の認証情報を **設定画面（GUI）から入力**できます（環境変数を手で設定する必要がありません）。
+Zendesk の接続設定を **設定画面（GUI）から入力**できます（環境変数を手で設定する必要がありません）。
 
 **ビルドの前提条件**
 - Node.js / `npx` が利用可能であること（初回ビルド時に `@anthropic-ai/mcpb` を npm から取得するためネットワーク接続が必要）
@@ -261,11 +288,10 @@ make mcpb
    （または 設定 → Extensions から `.mcpb` ファイルを指定してインストールする）。
 2. インストール時に表示される設定画面で、以下を入力する:
    - **Zendesk Subdomain**: `yourcompany`（`https://yourcompany.zendesk.com` の `yourcompany` 部分）
-   - **Zendesk Email**: ログインに使うメールアドレス
-   - **Zendesk API Token**: Zendesk 管理画面で発行した API トークン
+   - **Zendesk OAuth Client ID**: 手順1で作成した OAuth クライアントの識別子
    - **PII マスキング**（任意）: 個人情報（氏名・住所・メールアドレス・電話番号）のマスクを有効/無効にします。**デフォルトは有効**。オフにすると生の値がそのまま LLM へ送信されます（規程違反のリスクがあります）。
 3. インストール時に「依存関係を取得する」旨の確認ダイアログが表示されるので許可する。
-4. 有効化するとツールが利用可能になります。
+4. 有効化するとツールが利用可能になります。初回のツール実行時にブラウザで Zendesk の認可画面が開きます。
 
 **Python の準備は不要です**
 

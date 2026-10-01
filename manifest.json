@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "zendesk-mcp-server",
   "display_name": "Zendesk MCP Server",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "description": "Zendesk を Claude から直接操作する MCP サーバー（チケット・ナレッジベース・ユーザー・CSAT の15ツール）",
   "author": {
     "name": "OhshiroC"
@@ -20,8 +20,7 @@
       "args": ["run", "--no-sync", "python", "server.py"],
       "env": {
         "ZENDESK_SUBDOMAIN": "${user_config.zendesk_subdomain}",
-        "ZENDESK_EMAIL": "${user_config.zendesk_email}",
-        "ZENDESK_API_TOKEN": "${user_config.zendesk_api_token}",
+        "ZENDESK_OAUTH_CLIENT_ID": "${user_config.zendesk_oauth_client_id}",
         "ZENDESK_MASK_PII": "${user_config.mask_pii}"
       }
     }
@@ -33,17 +32,10 @@
       "description": "Zendesk のサブドメイン名（例: yourcompany）。https://yourcompany.zendesk.com の yourcompany 部分",
       "required": true
     },
-    "zendesk_email": {
+    "zendesk_oauth_client_id": {
       "type": "string",
-      "title": "Zendesk Email",
-      "description": "Zendesk にログインするメールアドレス",
-      "required": true
-    },
-    "zendesk_api_token": {
-      "type": "string",
-      "title": "Zendesk API Token",
-      "description": "Zendesk 管理画面で発行した API トークン",
-      "sensitive": true,
+      "title": "Zendesk OAuth Client ID",
+      "description": "Zendesk 管理画面で作成した OAuth クライアント（クライアントの種類: パブリック）の識別子。初回のツール実行時にブラウザで Zendesk の認可画面が開きます",
       "required": true
     },
     "mask_pii": {
