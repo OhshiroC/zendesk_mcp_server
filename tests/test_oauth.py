@@ -82,6 +82,13 @@ def test_expired_token_is_refreshed_and_rotated():
     assert server._load_token()["refresh_token"] == "rt2"
 
 
+def test_zero_expires_at_is_treated_as_expired():
+    # expires_at=0 を「期限なし」と誤認しないこと(実機スモークテストで見つかった不具合)
+    server._save_token({**_token(access="old"), "expires_at": 0})
+    with mock.patch.object(server, "_token_request", return_value=_token(access="new")):
+        assert server._get_access_token() == "new"
+
+
 def test_failed_refresh_discards_cache_and_starts_browser_auth():
     server._save_token(_token(expires_in=-10))
     err = urllib.error.HTTPError("u", 400, "invalid_grant", {}, io.BytesIO())

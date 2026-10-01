@@ -488,7 +488,8 @@ def _refresh(token: dict) -> dict | None:
     rt = token.get("refresh_token")
     if not rt:
         return None
-    if token.get("refresh_expires_at") and token["refresh_expires_at"] <= time.time():
+    refresh_expires_at = token.get("refresh_expires_at")
+    if refresh_expires_at is not None and refresh_expires_at <= time.time():
         return None
     try:
         new_token = _token_request({"grant_type": "refresh_token", "refresh_token": rt})
@@ -613,7 +614,7 @@ def _get_access_token(force_refresh: bool = False) -> str:
         token = _load_token()
         if token:
             expires_at = token.get("expires_at")
-            if not force_refresh and (not expires_at or expires_at - _TOKEN_REFRESH_MARGIN > time.time()):
+            if not force_refresh and (expires_at is None or expires_at - _TOKEN_REFRESH_MARGIN > time.time()):
                 return token["access_token"]
             token = _refresh(token)
             if token:
