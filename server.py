@@ -1448,8 +1448,14 @@ def handle(body: dict) -> dict | None:
             "serverInfo":      {"name": "zendesk-mcp", "version": "2.0.0"},
         })
 
-    if method == "notifications/initialized":
+    # JSON-RPC の通知 (id を持たないメッセージ) には応答してはならない。
+    # notifications/initialized 以外にも notifications/cancelled 等が届くため、
+    # id の有無で判定する。応答すると id: null のエラーとなりクライアントが検証エラーを出す。
+    if "id" not in body:
         return None
+
+    if method == "ping":
+        return ok({})
 
     if method == "tools/list":
         return ok({"tools": TOOLS})
@@ -1478,7 +1484,27 @@ def handle(body: dict) -> dict | None:
     return err(-32601, f"Method not found: {method}")
 
 
+def _force_utf8_stdio() -> None:
+    """stdio を UTF-8 に固定する。
+
+    Windows の Python 3.12/3.13 はパイプ接続の stdio を ANSI コードページ (日本語版は cp932、
+    英語版は cp1252) で読み書きする。MCP クライアントは UTF-8 前提のため、日本語を含む
+    応答が壊れた JSON になる / cp932 で表せない文字 (絵文字等) で UnicodeEncodeError になる。
+    stdout は改行を \n に固定し、Windows のテキストモードによる \r\n 変換も避ける。
+    """
+    for stream, kwargs in (
+        (sys.stdin,  {"encoding": "utf-8"}),
+        (sys.stdout, {"encoding": "utf-8", "newline": "\n"}),
+        (sys.stderr, {"encoding": "utf-8", "errors": "backslashreplace"}),
+    ):
+        try:
+            stream.reconfigure(**kwargs)
+        except (AttributeError, ValueError):
+            pass
+
+
 def main():
+    _force_utf8_stdio()
     sys.stderr.write("[zendesk-mcp] 起動しました（stdio モード）\n")
     sys.stderr.write(f"[zendesk-mcp] PII masking: {'ON' if MASK_PII else 'OFF'}\n")
     if not MASK_PII:
