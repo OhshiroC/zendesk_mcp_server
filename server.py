@@ -101,6 +101,18 @@ def _parse_mask_pii_env(value: str | None) -> bool:
 # デフォルト ON。ZENDESK_MASK_PII=0 / false でマスクを無効化できる。
 MASK_PII = _parse_mask_pii_env(os.environ.get("ZENDESK_MASK_PII"))
 
+
+def _parse_opt_in_env(value: str | None) -> bool:
+    # MASK_PII とは逆に、未設定や不明値は安全側 (OFF) に倒す。明示的な ON のみ True。
+    if value is None:
+        return False
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+# 誤爆すると外部・顧客に影響しうる書き込み (チケットへの社内メモ投稿、ヘルプ記事の公開) の許可。
+# デフォルト OFF。OFF の間は add_internal_note を tools/list に出さず、記事の公開も拒否する。
+ENABLE_SENSITIVE_WRITES = _parse_opt_in_env(os.environ.get("ZENDESK_ENABLE_SENSITIVE_WRITES"))
+
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-']+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 
 # 電話番号は形式別パターンで最低桁数を保証する。セパレータには \s を使わない
@@ -904,6 +916,23 @@ TOOLS = [
         },
     },
 
+    # ── チケット書き込み (ENABLE_SENSITIVE_WRITES のときだけ公開) ──
+    {
+        "name": "add_internal_note",
+        "description": (
+            "チケットに社内メモ（非公開コメント・顧客には見えない）を追加する。公開返信は送れない。"
+            "本文に [EMAIL] などのマスク用プレースホルダを含めないこと"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ticket_id": {"type": "integer", "description": "社内メモを追加するチケットID"},
+                "body":      {"type": "string",  "description": "社内メモの本文（プレーンテキスト）"},
+            },
+            "required": ["ticket_id", "body"],
+        },
+    },
+
     # ── ヘルプ記事書き込み ───────────────────────────────
     {
         "name": "create_kb_article",
@@ -928,7 +957,7 @@ TOOLS = [
                 "article_id": {"type": "integer", "description": "更新対象の記事ID"},
                 "title":      {"type": "string",  "description": "新しいタイトル（省略時は変更なし）"},
                 "body":       {"type": "string",  "description": "新しい本文（HTML形式）（省略時は変更なし）"},
-                "draft":      {"type": "boolean", "description": "Trueで下書きに戻す、Falseで公開（省略時は変更なし）"},
+                "draft":      {"type": "boolean", "description": "Trueで下書きに戻す、Falseで公開（省略時は変更なし）。公開は「社内メモ投稿・記事公開を許可」がオンのときだけ可能"},
                 "locale":     {"type": "string",  "description": "言語コード（デフォルト: ja）", "default": "ja"},
             },
             "required": ["article_id"],
@@ -1450,6 +1479,11 @@ def tool_update_kb_article(args: dict) -> str:
     if "body" in args:
         payload["body"] = args["body"]
     if "draft" in args:
+        if args["draft"] is False and not ENABLE_SENSITIVE_WRITES:
+            return (
+                "記事の公開は無効化されています。下書きのまま更新するか、拡張機能の設定で"
+                "「社内メモ投稿・記事公開を許可」をオンにしてください。"
+            )
         payload["draft"] = args["draft"]
     if not payload:
         return "更新内容が指定されていません。title / body / draft のいずれかを指定してください。"
@@ -1464,6 +1498,86 @@ def tool_update_kb_article(args: dict) -> str:
         f"更新日  : {article.get('updated_at', '')[:10]}",
         f"ステータス: {draft_status}",
     ]
+    return "\n".join(lines)
+
+
+# ── 社内メモ投稿 ──────────────────────────────────────────
+# 誤爆防止の方針:
+#   - public は常に False をコードで固定し、呼び出し側から変更する手段を持たせない
+#   - 投稿後は Zendesk の監査ログで、作られたコメントが非公開であることを確かめる
+#   - 投稿者を別ユーザー (例: Claude 用のエージェント) にする場合は、そのユーザーが
+#     エージェント/管理者であることを投稿前に確かめる。エンドユーザーは社内メモを
+#     書けないため、投稿者に指定すると公開コメント扱いになるおそれがある
+
+# 社内メモの投稿者にする Zendesk ユーザーID。未設定ならログイン中の本人が投稿者になる。
+# いずれの場合も、監査ログ上の更新者 (updater) はログイン中の本人として残る。
+ZENDESK_NOTE_AUTHOR_ID = (os.environ.get("ZENDESK_NOTE_AUTHOR_ID") or "").strip()
+
+_AGENT_ROLES = ("agent", "admin")
+_NOTE_AUTHOR_CACHE: dict[int, str] = {}  # user_id -> 表示名 (検証済みのもの)
+
+
+def _note_author_id() -> int | None:
+    if not ZENDESK_NOTE_AUTHOR_ID:
+        return None
+    try:
+        return int(ZENDESK_NOTE_AUTHOR_ID)
+    except ValueError:
+        raise RuntimeError(f"社内メモの投稿者ID（ZENDESK_NOTE_AUTHOR_ID）が数値ではありません: {ZENDESK_NOTE_AUTHOR_ID!r}")
+
+
+def _verify_note_author(user_id: int) -> str:
+    """投稿者に指定したユーザーがエージェント/管理者であることを確かめ、表示名を返す。"""
+    if user_id not in _NOTE_AUTHOR_CACHE:
+        user = zd_get(f"/users/{user_id}.json").get("user") or {}
+        if user.get("role") not in _AGENT_ROLES or not user.get("active", True):
+            raise RuntimeError(
+                f"社内メモの投稿者に指定されたユーザー {user_id} は有効なエージェント/管理者ではありません"
+                f"（role: {user.get('role')}）。エンドユーザーは社内メモを書けないため投稿を中止しました。"
+            )
+        _NOTE_AUTHOR_CACHE[user_id] = user.get("name") or str(user_id)
+    return _NOTE_AUTHOR_CACHE[user_id]
+
+
+def tool_add_internal_note(args: dict) -> str:
+    if not ENABLE_SENSITIVE_WRITES:
+        return "社内メモの投稿は無効化されています。拡張機能の設定で「社内メモ投稿・記事公開を許可」をオンにしてください。"
+    tid  = int(args["ticket_id"])
+    body = args.get("body") or ""
+    if not body.strip():
+        return "本文が空です。"
+
+    author_id = _note_author_id()
+    author_label = "ログイン中のユーザー"
+    if author_id is not None:
+        author_label = f"{_verify_note_author(author_id)}（ID: {author_id}）"
+
+    comment = {"body": body, "public": False}
+    if author_id is not None:
+        comment["author_id"] = author_id
+    data   = zd_put(f"/tickets/{tid}.json", {"ticket": {"comment": comment}})
+    events = (data.get("audit") or {}).get("events") or []
+    comments = [e for e in events if e.get("type") == "Comment"]
+    if not comments:
+        raise RuntimeError(f"チケット #{tid} の更新結果にコメントが見つかりません。Zendesk 上で内容を確認してください。")
+    if any(c.get("public") for c in comments):
+        raise RuntimeError(
+            f"警告: チケット #{tid} に公開コメントとして記録された可能性があります。"
+            "直ちに Zendesk 上で確認してください。"
+        )
+    note = comments[0]
+    lines = [
+        "# 社内メモを投稿しました",
+        "",
+        f"チケット: #{tid}",
+        f"コメントID: {note.get('id')}（非公開を確認済み）",
+        f"投稿者: {author_label}",
+    ]
+    if author_id is not None and note.get("author_id") != author_id:
+        lines.append(
+            f"⚠️ 投稿者が指定どおりになっていません（実際の author_id: {note.get('author_id')}）。"
+            "ログイン中のユーザーに他人名義で投稿する権限が無い可能性があります。"
+        )
     return "\n".join(lines)
 
 
@@ -1491,7 +1605,17 @@ TOOL_HANDLERS = {
     "list_user_fields":   tool_list_user_fields,
     "create_kb_article":  tool_create_kb_article,
     "update_kb_article":  tool_update_kb_article,
+    "add_internal_note":  tool_add_internal_note,
 }
+
+# ENABLE_SENSITIVE_WRITES が OFF のとき tools/list から隠すツール
+_SENSITIVE_TOOLS = {"add_internal_note"}
+
+
+def _visible_tools() -> list:
+    if ENABLE_SENSITIVE_WRITES:
+        return TOOLS
+    return [t for t in TOOLS if t["name"] not in _SENSITIVE_TOOLS]
 
 
 # ── MCP stdio ループ ──────────────────────────────────────
@@ -1525,7 +1649,7 @@ def handle(body: dict) -> dict | None:
         return ok({})
 
     if method == "tools/list":
-        return ok({"tools": TOOLS})
+        return ok({"tools": _visible_tools()})
 
     if method == "tools/call":
         name = body["params"]["name"]

@@ -3,7 +3,7 @@
   "name": "zendesk-mcp-server",
   "display_name": "Zendesk MCP Server",
   "version": "2.0.1",
-  "description": "Zendesk を Claude から直接操作する MCP サーバー（チケット・ナレッジベース・ユーザー・CSAT の15ツール）",
+  "description": "Zendesk を Claude から直接操作する MCP サーバー（チケット・ナレッジベース・ユーザー・CSAT の16ツール）",
   "author": {
     "name": "OhshiroC"
   },
@@ -22,6 +22,8 @@
         "ZENDESK_SUBDOMAIN": "${user_config.zendesk_subdomain}",
         "ZENDESK_OAUTH_CLIENT_ID": "${user_config.zendesk_oauth_client_id}",
         "ZENDESK_MASK_PII": "${user_config.mask_pii}",
+        "ZENDESK_ENABLE_SENSITIVE_WRITES": "${user_config.enable_sensitive_writes}",
+        "ZENDESK_NOTE_AUTHOR_ID": "${user_config.note_author_id}",
         "PYTHONUTF8": "1"
       }
     }
@@ -45,6 +47,20 @@
       "description": "Zendesk から取得した個人情報をマスクしてから返します。メールアドレス・電話番号は [EMAIL] / [PHONE] に置換、ユーザー名は [NAME]、住所フィールドは [ADDRESS] に置換します。さらに氏名・住所を含む文は文ごと [NAME] / [ADDRESS] に置き換えます（どちらを検出して落としたか識別できます。NER が未導入の環境では自由記述本文をすべて [REDACTED] にする縮退動作）。オフにすると生の値がそのまま LLM へ送信されます（社内規程・顧客との契約に違反する可能性があります）。",
       "required": false,
       "default": true
+    },
+    "enable_sensitive_writes": {
+      "type": "boolean",
+      "title": "社内メモ投稿・記事公開を許可",
+      "description": "オンにすると、チケットへの社内メモ（非公開コメント）の投稿と、ヘルプ記事の公開ができるようになります。公開返信を送る機能はありません。",
+      "required": false,
+      "default": false
+    },
+    "note_author_id": {
+      "type": "string",
+      "title": "社内メモの投稿者ID（任意）",
+      "description": "社内メモの投稿者にする Zendesk ユーザーのID（例: Claude 用に作ったエージェント）。Claude が書いたメモだと分かるようにしたい場合に指定します。空欄ならログイン中の本人が投稿者になります。指定できるのはエージェント/管理者のみです。どちらの場合も、更新履歴にはログイン中の本人が更新者として残ります。",
+      "required": false,
+      "default": ""
     }
   },
   "compatibility": {
