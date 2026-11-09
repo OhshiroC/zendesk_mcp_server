@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "zendesk-mcp-server",
   "display_name": "Zendesk MCP Server",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Zendesk を Claude から直接操作する MCP サーバー（チケット・ナレッジベース・ユーザー・CSAT の15ツール）",
   "author": {
     "name": "OhshiroC"
@@ -21,7 +21,8 @@
       "env": {
         "ZENDESK_SUBDOMAIN": "${user_config.zendesk_subdomain}",
         "ZENDESK_OAUTH_CLIENT_ID": "${user_config.zendesk_oauth_client_id}",
-        "ZENDESK_MASK_PII": "${user_config.mask_pii}"
+        "ZENDESK_MASK_PII": "${user_config.mask_pii}",
+        "PYTHONUTF8": "1"
       }
     }
   },
