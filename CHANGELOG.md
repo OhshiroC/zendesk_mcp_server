@@ -1,5 +1,10 @@
 # Changelog
 
+## [v2.0.2](https://github.com/OhshiroC/zendesk_mcp_server/compare/v2.0.1...v2.0.2) - 2026-11-09
+
+- feat: get_ticket でチケットのカスタムフィールドを返す by @rnakamura224 in https://github.com/OhshiroC/zendesk_mcp_server/pull/5
+- feat: チケットに社内メモを投稿する add_internal_note を追加する by @OhshiroC in https://github.com/OhshiroC/zendesk_mcp_server/pull/11
+
 ## [v2.0.1](https://github.com/OhshiroC/zendesk_mcp_server/commits/v2.0.1) - 2026-11-09
 
 - setup for Claude Code plugin by @handlename in https://github.com/OhshiroC/zendesk_mcp_server/pull/1
