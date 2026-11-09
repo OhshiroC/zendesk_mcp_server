@@ -1,0 +1,50 @@
+# 氏名・住所 redaction の NER 層（任意依存）
+#
+# このファイルは必須ではない。未導入でもサーバは動作するが、その場合は
+# 自由記述本文（コメント本文・件名・CSAT コメント）がすべて [REDACTED] に
+# 置き換わる縮退動作になる（fail-closed）。
+#
+# 導入すると文単位の判定に NER が使われ、氏名・住所を含まない文が読める形で残る。
+#
+#   python3 -m pip install -r requirements-ner.txt
+#
+# ── モデルの選定 ──────────────────────────────────────────
+#
+# ja_core_news_md を採用する。ライセンスは CC BY-SA 4.0（学習元 UD Japanese GSD
+# も CC BY-SA 4.0、単語ベクトル chiVe は Apache-2.0）で NonCommercial 制限がない。
+#
+# 公開されている精度（モデルの meta.json より）:
+#   ja_core_news_sm  ents_f 0.6087 / recall 0.5547 / ベクトルなし / 12MB
+#   ja_core_news_md  ents_f 0.7043 / recall 0.6755 / chiVe 300d   / 40MB  ← 採用
+#   ja_core_news_lg  ents_f 0.7223 / recall 0.6969 / chiVe 300d   / 530MB
+#
+# sm はベクトルを持たないため未知語（珍しい姓・難読地名）に弱く、この機能で
+# 最も重要な部分が落ちる。lg は 530MB に対して md より +0.018 しか伸びない。
+#
+# NOTE: ja-ginza は採用しない。パッケージは MIT 宣言だが、wheel 内 meta.json の
+# sources に学習元として UD_Japanese-BCCWJ (CC BY-NC-SA 4.0) と GSK2014-A
+# (個別に定める商用ライセンス) が記載されている。NC は再配布だけでなく商用利用
+# 自体を制限するため、業務利用および .mcpb への同梱配布に適さない。
+#
+# ── 注意 ────────────────────────────────────────────────
+#
+# - spaCy 本体はコンパイル拡張を含むため wheel が OS / arch / Python マイナー版に
+#   依存する（例: spacy-3.8.14-cp313-cp313-macosx_11_0_arm64.whl）。
+#   Python 3.14 系では wheel 未提供の場合がある（3.12 / 3.13 を推奨）。
+# - .mcpb バンドルへ同梱する場合、モデル本体（py3-none-any）は移植可能だが
+#   spaCy 系は移植できない。mcpb 公式も "Cannot portably bundle compiled
+#   dependencies" と明記している。
+# - CC BY-SA 4.0 のモデルを再配布する場合は BY（表示）義務がある。
+
+spacy>=3.8.0,<3.9.0
+https://github.com/explosion/spacy-models/releases/download/ja_core_news_md-3.8.0/ja_core_news_md-3.8.0-py3-none-any.whl
+
+# spacy 3.8.14 の spacy/cli/_util.py は `from click import NoSuchOption` を実行するが、
+# spacy は click を直接宣言しておらず（Requires-Dist は typer<1.0.0,>=0.3.0 のみ）、
+# typer 0.27.0 が click への依存を落としたため import が壊れる。明示的に追加する。
+# これは同梱に限らず通常の pip install でも発生する上流の不整合。
+click
+
+# spaCy の日本語トークナイザが要求する形態素解析器（モデルの requirements より）
+sudachipy>=0.5.2,!=0.6.1
+sudachidict-core>=20211220

@@ -137,3 +137,44 @@ def test_get_ticket_omits_section_when_no_values():
     out = _get_ticket([{"id": 101, "value": None}])
     assert "## カスタムフィールド" not in out
     assert "## コメント" in out
+
+
+# ── 自由記述以外は redaction を通さない (main の文単位 redaction との統合) ──
+
+_TYPED_FIELDS = {
+    "ticket_fields": [
+        {"id": 201, "title": "シリアルナンバー", "type": "text"},
+        {"id": 202, "title": "ログイン・アカウント作成の内容", "type": "tagger"},
+        {"id": 203, "title": "Total time spent (sec)", "type": "integer"},
+        {"id": 204, "title": "発生状況", "type": "textarea"},
+        {"id": 205, "title": "配送先住所", "type": "text"},
+    ]
+}
+
+
+def _format_typed(custom_fields, mask_pii=True):
+    with mock.patch.object(server, "MASK_PII", mask_pii), \
+         mock.patch.object(server, "zd_get", return_value=_TYPED_FIELDS):
+        return server._format_custom_fields({"custom_fields": custom_fields})
+
+
+@pytest.mark.parametrize("fid, value", [
+    (201, "1W012345678901"),         # 識別子形式の値
+    (201, "ab-1234567890123-456"),   # 会話ID形式
+    (202, "account_削除"),            # 選択肢 (tagger)
+    (203, 421),                       # 数値
+])
+def test_structured_or_identifier_values_are_not_redacted(fid, value):
+    out = _format_typed([{"id": fid, "value": value}])
+    assert out[0].endswith(f": {value}")
+
+
+def test_address_titled_field_masked():
+    assert _format_typed([{"id": 205, "value": "東京都渋谷区神南1-2-3"}]) == ["- 配送先住所: [ADDRESS]"]
+
+
+def test_free_text_goes_through_redaction():
+    with mock.patch.object(server, "mask_user_field", return_value="REDACTED") as m:
+        out = _format_typed([{"id": 204, "value": "田中です。電源が入らない"}])
+    m.assert_called_once()
+    assert out == ["- 発生状況: REDACTED"]
