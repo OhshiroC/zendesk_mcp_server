@@ -21,7 +21,6 @@ import sys
 import ssl
 import base64
 import hashlib
-import hmac
 import html
 import http.server
 import secrets
@@ -922,16 +921,13 @@ TOOLS = [
         "name": "add_internal_note",
         "description": (
             "チケットに社内メモ（非公開コメント・顧客には見えない）を追加する。公開返信は送れない。"
-            "2段階で動く: (1) confirm_token なしで呼ぶと投稿せず、対象チケットと本文のプレビューと confirm_token を返す。"
-            "(2) プレビューをユーザーに見せて了承を得てから、同じ ticket_id・body に confirm_token を付けて呼ぶと投稿する。"
-            "ticket_id や body を変えた場合は (1) からやり直す。本文に [EMAIL] などのマスク用プレースホルダを含めないこと"
+            "本文に [EMAIL] などのマスク用プレースホルダを含めないこと"
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "ticket_id":     {"type": "integer", "description": "社内メモを追加するチケットID"},
-                "body":          {"type": "string",  "description": "社内メモの本文（プレーンテキスト）"},
-                "confirm_token": {"type": "string",  "description": "プレビュー時に返された確認トークン。初回は省略する"},
+                "ticket_id": {"type": "integer", "description": "社内メモを追加するチケットID"},
+                "body":      {"type": "string",  "description": "社内メモの本文（プレーンテキスト）"},
             },
             "required": ["ticket_id", "body"],
         },
@@ -1441,31 +1437,39 @@ def tool_update_kb_article(args: dict) -> str:
 # ── 社内メモ投稿 ──────────────────────────────────────────
 # 誤爆防止の方針:
 #   - public は常に False をコードで固定し、呼び出し側から変更する手段を持たせない
-#   - 1 回目はプレビューのみ。ticket_id と body に結び付いた期限付きトークンを返し、
-#     同じ内容 + トークンの 2 回目でのみ投稿する (別チケットへの取り違え・本文のすり替えを防ぐ)
 #   - 投稿後は Zendesk の監査ログで、作られたコメントが非公開であることを確かめる
+#   - 投稿者を別ユーザー (例: Claude 用のエージェント) にする場合は、そのユーザーが
+#     エージェント/管理者であることを投稿前に確かめる。エンドユーザーは社内メモを
+#     書けないため、投稿者に指定すると公開コメント扱いになるおそれがある
 
-_NOTE_TOKEN_TTL = 600  # 秒
-_NOTE_TOKEN_KEY = secrets.token_bytes(32)  # プロセスごとに生成。再起動でトークンは無効になる
+# 社内メモの投稿者にする Zendesk ユーザーID。未設定ならログイン中の本人が投稿者になる。
+# いずれの場合も、監査ログ上の更新者 (updater) はログイン中の本人として残る。
+ZENDESK_NOTE_AUTHOR_ID = (os.environ.get("ZENDESK_NOTE_AUTHOR_ID") or "").strip()
+
+_AGENT_ROLES = ("agent", "admin")
+_NOTE_AUTHOR_CACHE: dict[int, str] = {}  # user_id -> 表示名 (検証済みのもの)
 
 
-def _note_token(ticket_id: int, body: str, expires: int) -> str:
-    msg = f"{ticket_id}\n{expires}\n{body}".encode("utf-8")
-    sig = hmac.new(_NOTE_TOKEN_KEY, msg, hashlib.sha256).hexdigest()[:24]
-    return f"{expires}.{sig}"
-
-
-def _check_note_token(token: str, ticket_id: int, body: str, now: float) -> str | None:
-    """トークンが正しければ None、不正ならその理由を返す。"""
+def _note_author_id() -> int | None:
+    if not ZENDESK_NOTE_AUTHOR_ID:
+        return None
     try:
-        expires = int(token.split(".", 1)[0])
+        return int(ZENDESK_NOTE_AUTHOR_ID)
     except ValueError:
-        return "確認トークンの形式が不正です"
-    if not hmac.compare_digest(token, _note_token(ticket_id, body, expires)):
-        return "確認トークンがチケットIDまたは本文と一致しません（内容が変わった可能性があります）"
-    if now > expires:
-        return "確認トークンの有効期限が切れています"
-    return None
+        raise RuntimeError(f"社内メモの投稿者ID（ZENDESK_NOTE_AUTHOR_ID）が数値ではありません: {ZENDESK_NOTE_AUTHOR_ID!r}")
+
+
+def _verify_note_author(user_id: int) -> str:
+    """投稿者に指定したユーザーがエージェント/管理者であることを確かめ、表示名を返す。"""
+    if user_id not in _NOTE_AUTHOR_CACHE:
+        user = zd_get(f"/users/{user_id}.json").get("user") or {}
+        if user.get("role") not in _AGENT_ROLES or not user.get("active", True):
+            raise RuntimeError(
+                f"社内メモの投稿者に指定されたユーザー {user_id} は有効なエージェント/管理者ではありません"
+                f"（role: {user.get('role')}）。エンドユーザーは社内メモを書けないため投稿を中止しました。"
+            )
+        _NOTE_AUTHOR_CACHE[user_id] = user.get("name") or str(user_id)
+    return _NOTE_AUTHOR_CACHE[user_id]
 
 
 def tool_add_internal_note(args: dict) -> str:
@@ -1475,33 +1479,16 @@ def tool_add_internal_note(args: dict) -> str:
     body = args.get("body") or ""
     if not body.strip():
         return "本文が空です。"
-    token = args.get("confirm_token")
 
-    t = zd_get(f"/tickets/{tid}.json")["ticket"]
-    if t.get("status") == "closed":
-        return f"チケット #{tid} はクローズ済みのため、コメントを追加できません。"
-    header = (
-        f"チケット #{tid}: {mask_free_text(t.get('subject') or '')}\n"
-        f"ステータス: {t.get('status')} | 更新: {(t.get('updated_at') or '')[:10]}"
-    )
+    author_id = _note_author_id()
+    author_label = "ログイン中のユーザー"
+    if author_id is not None:
+        author_label = f"{_verify_note_author(author_id)}（ID: {author_id}）"
 
-    if not token:
-        expires = int(time.time()) + _NOTE_TOKEN_TTL
-        return (
-            "# 社内メモのプレビュー（まだ投稿していません）\n\n"
-            f"{header}\n"
-            "種別: 社内メモ（非公開・顧客には表示されません）\n\n"
-            f"--- 本文 ---\n{body}\n------------\n\n"
-            "対象チケットと本文をユーザーに確認してもらい、了承を得てから、"
-            f"同じ ticket_id と body に confirm_token=\"{_note_token(tid, body, expires)}\" を付けて"
-            f"もう一度呼んでください（有効期限 {_NOTE_TOKEN_TTL // 60} 分）。"
-        )
-
-    problem = _check_note_token(token, tid, body, time.time())
-    if problem:
-        return f"投稿を中止しました: {problem}。confirm_token なしで呼び直してプレビューからやり直してください。"
-
-    data   = zd_put(f"/tickets/{tid}.json", {"ticket": {"comment": {"body": body, "public": False}}})
+    comment = {"body": body, "public": False}
+    if author_id is not None:
+        comment["author_id"] = author_id
+    data   = zd_put(f"/tickets/{tid}.json", {"ticket": {"comment": comment}})
     events = (data.get("audit") or {}).get("events") or []
     comments = [e for e in events if e.get("type") == "Comment"]
     if not comments:
@@ -1511,11 +1498,20 @@ def tool_add_internal_note(args: dict) -> str:
             f"警告: チケット #{tid} に公開コメントとして記録された可能性があります。"
             "直ちに Zendesk 上で確認してください。"
         )
-    return (
-        "# 社内メモを投稿しました\n\n"
-        f"{header}\n"
-        f"コメントID: {comments[0].get('id')}（非公開を確認済み）"
-    )
+    note = comments[0]
+    lines = [
+        "# 社内メモを投稿しました",
+        "",
+        f"チケット: #{tid}",
+        f"コメントID: {note.get('id')}（非公開を確認済み）",
+        f"投稿者: {author_label}",
+    ]
+    if author_id is not None and note.get("author_id") != author_id:
+        lines.append(
+            f"⚠️ 投稿者が指定どおりになっていません（実際の author_id: {note.get('author_id')}）。"
+            "ログイン中のユーザーに他人名義で投稿する権限が無い可能性があります。"
+        )
+    return "\n".join(lines)
 
 
 # KB ツールは記事本文(サポート窓口の連絡先等)を返すため、regex マスクの対象外にする。

@@ -23,6 +23,7 @@
         "ZENDESK_OAUTH_CLIENT_ID": "${user_config.zendesk_oauth_client_id}",
         "ZENDESK_MASK_PII": "${user_config.mask_pii}",
         "ZENDESK_ENABLE_SENSITIVE_WRITES": "${user_config.enable_sensitive_writes}",
+        "ZENDESK_NOTE_AUTHOR_ID": "${user_config.note_author_id}",
         "PYTHONUTF8": "1"
       }
     }
@@ -50,9 +51,16 @@
     "enable_sensitive_writes": {
       "type": "boolean",
       "title": "社内メモ投稿・記事公開を許可",
-      "description": "オンにすると、チケットへの社内メモ（非公開コメント）の投稿と、ヘルプ記事の公開ができるようになります。社内メモは投稿前に必ずプレビューと確認を挟みます。公開返信を送る機能はありません。",
+      "description": "オンにすると、チケットへの社内メモ（非公開コメント）の投稿と、ヘルプ記事の公開ができるようになります。公開返信を送る機能はありません。",
       "required": false,
       "default": false
+    },
+    "note_author_id": {
+      "type": "string",
+      "title": "社内メモの投稿者ID（任意）",
+      "description": "社内メモの投稿者にする Zendesk ユーザーのID（例: Claude 用に作ったエージェント）。Claude が書いたメモだと分かるようにしたい場合に指定します。空欄ならログイン中の本人が投稿者になります。指定できるのはエージェント/管理者のみです。どちらの場合も、更新履歴にはログイン中の本人が更新者として残ります。",
+      "required": false,
+      "default": ""
     }
   },
   "compatibility": {
