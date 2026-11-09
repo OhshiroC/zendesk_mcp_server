@@ -21,6 +21,7 @@ import sys
 import ssl
 import base64
 import hashlib
+import hmac
 import html
 import http.server
 import secrets
@@ -100,6 +101,18 @@ def _parse_mask_pii_env(value: str | None) -> bool:
 
 # デフォルト ON。ZENDESK_MASK_PII=0 / false でマスクを無効化できる。
 MASK_PII = _parse_mask_pii_env(os.environ.get("ZENDESK_MASK_PII"))
+
+
+def _parse_opt_in_env(value: str | None) -> bool:
+    # MASK_PII とは逆に、未設定や不明値は安全側 (OFF) に倒す。明示的な ON のみ True。
+    if value is None:
+        return False
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+# 誤爆すると外部・顧客に影響しうる書き込み (チケットへの社内メモ投稿、ヘルプ記事の公開) の許可。
+# デフォルト OFF。OFF の間は add_internal_note を tools/list に出さず、記事の公開も拒否する。
+ENABLE_SENSITIVE_WRITES = _parse_opt_in_env(os.environ.get("ZENDESK_ENABLE_SENSITIVE_WRITES"))
 
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-']+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 
@@ -904,6 +917,26 @@ TOOLS = [
         },
     },
 
+    # ── チケット書き込み (ENABLE_SENSITIVE_WRITES のときだけ公開) ──
+    {
+        "name": "add_internal_note",
+        "description": (
+            "チケットに社内メモ（非公開コメント・顧客には見えない）を追加する。公開返信は送れない。"
+            "2段階で動く: (1) confirm_token なしで呼ぶと投稿せず、対象チケットと本文のプレビューと confirm_token を返す。"
+            "(2) プレビューをユーザーに見せて了承を得てから、同じ ticket_id・body に confirm_token を付けて呼ぶと投稿する。"
+            "ticket_id や body を変えた場合は (1) からやり直す。本文に [EMAIL] などのマスク用プレースホルダを含めないこと"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ticket_id":     {"type": "integer", "description": "社内メモを追加するチケットID"},
+                "body":          {"type": "string",  "description": "社内メモの本文（プレーンテキスト）"},
+                "confirm_token": {"type": "string",  "description": "プレビュー時に返された確認トークン。初回は省略する"},
+            },
+            "required": ["ticket_id", "body"],
+        },
+    },
+
     # ── ヘルプ記事書き込み ───────────────────────────────
     {
         "name": "create_kb_article",
@@ -928,7 +961,7 @@ TOOLS = [
                 "article_id": {"type": "integer", "description": "更新対象の記事ID"},
                 "title":      {"type": "string",  "description": "新しいタイトル（省略時は変更なし）"},
                 "body":       {"type": "string",  "description": "新しい本文（HTML形式）（省略時は変更なし）"},
-                "draft":      {"type": "boolean", "description": "Trueで下書きに戻す、Falseで公開（省略時は変更なし）"},
+                "draft":      {"type": "boolean", "description": "Trueで下書きに戻す、Falseで公開（省略時は変更なし）。公開は「社内メモ投稿・記事公開を許可」がオンのときだけ可能"},
                 "locale":     {"type": "string",  "description": "言語コード（デフォルト: ja）", "default": "ja"},
             },
             "required": ["article_id"],
@@ -1383,6 +1416,11 @@ def tool_update_kb_article(args: dict) -> str:
     if "body" in args:
         payload["body"] = args["body"]
     if "draft" in args:
+        if args["draft"] is False and not ENABLE_SENSITIVE_WRITES:
+            return (
+                "記事の公開は無効化されています。下書きのまま更新するか、拡張機能の設定で"
+                "「社内メモ投稿・記事公開を許可」をオンにしてください。"
+            )
         payload["draft"] = args["draft"]
     if not payload:
         return "更新内容が指定されていません。title / body / draft のいずれかを指定してください。"
@@ -1398,6 +1436,86 @@ def tool_update_kb_article(args: dict) -> str:
         f"ステータス: {draft_status}",
     ]
     return "\n".join(lines)
+
+
+# ── 社内メモ投稿 ──────────────────────────────────────────
+# 誤爆防止の方針:
+#   - public は常に False をコードで固定し、呼び出し側から変更する手段を持たせない
+#   - 1 回目はプレビューのみ。ticket_id と body に結び付いた期限付きトークンを返し、
+#     同じ内容 + トークンの 2 回目でのみ投稿する (別チケットへの取り違え・本文のすり替えを防ぐ)
+#   - 投稿後は Zendesk の監査ログで、作られたコメントが非公開であることを確かめる
+
+_NOTE_TOKEN_TTL = 600  # 秒
+_NOTE_TOKEN_KEY = secrets.token_bytes(32)  # プロセスごとに生成。再起動でトークンは無効になる
+
+
+def _note_token(ticket_id: int, body: str, expires: int) -> str:
+    msg = f"{ticket_id}\n{expires}\n{body}".encode("utf-8")
+    sig = hmac.new(_NOTE_TOKEN_KEY, msg, hashlib.sha256).hexdigest()[:24]
+    return f"{expires}.{sig}"
+
+
+def _check_note_token(token: str, ticket_id: int, body: str, now: float) -> str | None:
+    """トークンが正しければ None、不正ならその理由を返す。"""
+    try:
+        expires = int(token.split(".", 1)[0])
+    except ValueError:
+        return "確認トークンの形式が不正です"
+    if not hmac.compare_digest(token, _note_token(ticket_id, body, expires)):
+        return "確認トークンがチケットIDまたは本文と一致しません（内容が変わった可能性があります）"
+    if now > expires:
+        return "確認トークンの有効期限が切れています"
+    return None
+
+
+def tool_add_internal_note(args: dict) -> str:
+    if not ENABLE_SENSITIVE_WRITES:
+        return "社内メモの投稿は無効化されています。拡張機能の設定で「社内メモ投稿・記事公開を許可」をオンにしてください。"
+    tid  = int(args["ticket_id"])
+    body = args.get("body") or ""
+    if not body.strip():
+        return "本文が空です。"
+    token = args.get("confirm_token")
+
+    t = zd_get(f"/tickets/{tid}.json")["ticket"]
+    if t.get("status") == "closed":
+        return f"チケット #{tid} はクローズ済みのため、コメントを追加できません。"
+    header = (
+        f"チケット #{tid}: {mask_free_text(t.get('subject') or '')}\n"
+        f"ステータス: {t.get('status')} | 更新: {(t.get('updated_at') or '')[:10]}"
+    )
+
+    if not token:
+        expires = int(time.time()) + _NOTE_TOKEN_TTL
+        return (
+            "# 社内メモのプレビュー（まだ投稿していません）\n\n"
+            f"{header}\n"
+            "種別: 社内メモ（非公開・顧客には表示されません）\n\n"
+            f"--- 本文 ---\n{body}\n------------\n\n"
+            "対象チケットと本文をユーザーに確認してもらい、了承を得てから、"
+            f"同じ ticket_id と body に confirm_token=\"{_note_token(tid, body, expires)}\" を付けて"
+            f"もう一度呼んでください（有効期限 {_NOTE_TOKEN_TTL // 60} 分）。"
+        )
+
+    problem = _check_note_token(token, tid, body, time.time())
+    if problem:
+        return f"投稿を中止しました: {problem}。confirm_token なしで呼び直してプレビューからやり直してください。"
+
+    data   = zd_put(f"/tickets/{tid}.json", {"ticket": {"comment": {"body": body, "public": False}}})
+    events = (data.get("audit") or {}).get("events") or []
+    comments = [e for e in events if e.get("type") == "Comment"]
+    if not comments:
+        raise RuntimeError(f"チケット #{tid} の更新結果にコメントが見つかりません。Zendesk 上で内容を確認してください。")
+    if any(c.get("public") for c in comments):
+        raise RuntimeError(
+            f"警告: チケット #{tid} に公開コメントとして記録された可能性があります。"
+            "直ちに Zendesk 上で確認してください。"
+        )
+    return (
+        "# 社内メモを投稿しました\n\n"
+        f"{header}\n"
+        f"コメントID: {comments[0].get('id')}（非公開を確認済み）"
+    )
 
 
 # KB ツールは記事本文(サポート窓口の連絡先等)を返すため、regex マスクの対象外にする。
@@ -1424,7 +1542,17 @@ TOOL_HANDLERS = {
     "list_user_fields":   tool_list_user_fields,
     "create_kb_article":  tool_create_kb_article,
     "update_kb_article":  tool_update_kb_article,
+    "add_internal_note":  tool_add_internal_note,
 }
+
+# ENABLE_SENSITIVE_WRITES が OFF のとき tools/list から隠すツール
+_SENSITIVE_TOOLS = {"add_internal_note"}
+
+
+def _visible_tools() -> list:
+    if ENABLE_SENSITIVE_WRITES:
+        return TOOLS
+    return [t for t in TOOLS if t["name"] not in _SENSITIVE_TOOLS]
 
 
 # ── MCP stdio ループ ──────────────────────────────────────
@@ -1458,7 +1586,7 @@ def handle(body: dict) -> dict | None:
         return ok({})
 
     if method == "tools/list":
-        return ok({"tools": TOOLS})
+        return ok({"tools": _visible_tools()})
 
     if method == "tools/call":
         name = body["params"]["name"]
