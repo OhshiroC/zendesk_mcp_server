@@ -32,9 +32,49 @@ import urllib.parse
 import webbrowser
 from datetime import datetime, timezone
 
-# SSL コンテキスト
-# SSLCertVerificationError 対策の暫定対応のため、セキュリティ注意
-_SSL_CTX = ssl._create_unverified_context()
+# ── SSL コンテキスト ──────────────────────────────────────
+# python.org 版の macOS Python や uv 管理の Python は OpenSSL の CA ストアが空のことがあり、
+# ssl.create_default_context() だけでは CERTIFICATE_VERIFY_FAILED になる。
+# 検証は無効化せず、次の順で信頼する CA を用意する:
+#   1. truststore: OS の証明書ストア (macOS キーチェーン / Windows 証明書ストア) を使う。
+#      社内プロキシ等で追加されたルート CA にも追従できる
+#   2. 標準のデフォルト (SSL_CERT_FILE / SSL_CERT_DIR 環境変数も尊重される)
+#      + certifi の CA バンドル
+#   3. それでも CA が空なら OS 同梱の既知パス (/etc/ssl/cert.pem 等) を読む
+#      (依存を入れずに system python3 で動かす経路向け)
+
+_FALLBACK_CA_FILES = (
+    "/etc/ssl/cert.pem",                    # macOS / Alpine / BSD
+    "/etc/ssl/certs/ca-certificates.crt",   # Debian / Ubuntu
+    "/etc/pki/tls/certs/ca-bundle.crt",     # RHEL / Fedora
+)
+
+
+def _build_ssl_context() -> ssl.SSLContext:
+    try:
+        import truststore
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except Exception:
+        pass
+
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+        ctx.load_verify_locations(cafile=certifi.where())
+    except Exception:
+        pass
+    if ctx.cert_store_stats().get("x509_ca", 0) == 0:
+        for path in _FALLBACK_CA_FILES:
+            if os.path.isfile(path):
+                try:
+                    ctx.load_verify_locations(cafile=path)
+                    break
+                except ssl.SSLError:
+                    continue
+    return ctx
+
+
+_SSL_CTX = _build_ssl_context()
 
 # ── 環境変数 ──────────────────────────────────────────────
 ZENDESK_SUBDOMAIN = os.environ.get("ZENDESK_SUBDOMAIN", "")
