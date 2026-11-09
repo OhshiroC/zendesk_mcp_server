@@ -1,6 +1,6 @@
 # Changelog
 
-## [v2.0.0](https://github.com/OhshiroC/zendesk_mcp_server/commits/v2.0.0) - 2026-11-09
+## [v2.0.1](https://github.com/OhshiroC/zendesk_mcp_server/commits/v2.0.1) - 2026-11-09
 
 - setup for Claude Code plugin by @handlename in https://github.com/OhshiroC/zendesk_mcp_server/pull/1
 - feat: .mcpb バンドルをビルド可能にする by @handlename in https://github.com/OhshiroC/zendesk_mcp_server/pull/2
