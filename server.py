@@ -1445,7 +1445,7 @@ def handle(body: dict) -> dict | None:
         return ok({
             "protocolVersion": "2024-11-05",
             "capabilities":    {"tools": {}},
-            "serverInfo":      {"name": "zendesk-mcp", "version": "2.0.1"},
+            "serverInfo":      {"name": "zendesk-mcp", "version": "2.0.0"},
         })
 
     # JSON-RPC の通知 (id を持たないメッセージ) には応答してはならない。
