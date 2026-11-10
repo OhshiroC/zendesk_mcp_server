@@ -1,6 +1,6 @@
 # Changelog
 
-## [v2.0.3](https://github.com/OhshiroC/zendesk_mcp_server/compare/v2.0.2...v2.0.3) - 2026-11-10
+## [v2.1.0](https://github.com/OhshiroC/zendesk_mcp_server/compare/v2.0.2...v2.1.0) - 2026-11-10
 
 - feat: 返信下書きと実際の返信を比較できるようにする by @OhshiroC in https://github.com/OhshiroC/zendesk_mcp_server/pull/13
 - feat: チケットのカスタムフィールドの定義一覧・絞り込み・一覧表示 by @OhshiroC in https://github.com/OhshiroC/zendesk_mcp_server/pull/14
