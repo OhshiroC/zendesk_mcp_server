@@ -758,7 +758,7 @@ TOOLS = [
     # ── チケット系 ──────────────────────────────────────
     {
         "name": "search_tickets",
-        "description": "チケットをキーワード・ステータス・タグ・担当者・日付等で検索する。keywordはタイトル・コメント本文の全文検索",
+        "description": "チケットをキーワード・ステータス・タグ・担当者・日付・カスタムフィールドの値等で検索する。keywordはタイトル・コメント本文の全文検索。custom_fields を指定すると各チケットのカスタムフィールドの値も一覧に出す",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -771,6 +771,9 @@ TOOLS = [
                 "updated_before": {"type": "string",  "description": "この日付以前に更新（YYYY-MM-DD）"},
                 "per_page":       {"type": "integer", "description": "1ページあたりの取得件数（最大100）", "default": 100},
                 "max_total":      {"type": "integer", "description": "取得上限件数（デフォルト200）。1000超を指定するとExport APIで大量取得可能（ソートはcreated_at昇順固定）", "default": 200},
+                "custom_field_filters": {"type": "object", "additionalProperties": {"type": ["string", "number", "boolean"]}, "description": "カスタムフィールドの値で絞り込む。{\"表示名またはフィールドID\": \"値\"} の形（例: {\"製品名\": \"Model X\"}）。選択肢は表示名でも値（タグ）でも可。複数指定はAND。フィールド名・選択肢は list_ticket_fields で確認できる"},
+                "custom_fields":  {"type": "array", "items": {"type": ["string", "integer"]}, "description": "各チケットの行に値を表示するカスタムフィールド（表示名またはID）のリスト（例: ['製品名', 'OS']）"},
+                "include_all_custom_fields": {"type": "boolean", "description": "値の入っているカスタムフィールドをすべて各行に表示する（件数が多いと長くなる）", "default": False},
             },
         },
     },
@@ -791,7 +794,7 @@ TOOLS = [
     },
     {
         "name": "list_tickets",
-        "description": "最近のチケット一覧を取得する（傾向分析向け）。タグで絞り込むことも可能",
+        "description": "最近のチケット一覧を取得する（傾向分析向け）。タグ・日付・カスタムフィールドの値で絞り込める。custom_fields を指定すると各チケットのカスタムフィールドの値も一覧に出す",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -803,6 +806,25 @@ TOOLS = [
                 "updated_after":  {"type": "string",  "description": "この日付以降に更新（YYYY-MM-DD）"},
                 "updated_before": {"type": "string",  "description": "この日付以前に更新（YYYY-MM-DD）"},
                 "max_total":      {"type": "integer", "description": "取得上限件数（デフォルト200）。上限に達した場合は残り件数を通知する", "default": 200},
+                "custom_field_filters": {"type": "object", "additionalProperties": {"type": ["string", "number", "boolean"]}, "description": "カスタムフィールドの値で絞り込む。{\"表示名またはフィールドID\": \"値\"} の形（例: {\"製品名\": \"Model X\"}）。選択肢は表示名でも値（タグ）でも可。複数指定はAND。フィールド名・選択肢は list_ticket_fields で確認できる"},
+                "custom_fields":  {"type": "array", "items": {"type": ["string", "integer"]}, "description": "各チケットの行に値を表示するカスタムフィールド（表示名またはID）のリスト（例: ['製品名', 'OS']）"},
+                "include_all_custom_fields": {"type": "boolean", "description": "値の入っているカスタムフィールドをすべて各行に表示する（件数が多いと長くなる）", "default": False},
+            },
+        },
+    },
+    {
+        "name": "list_ticket_fields",
+        "description": (
+            "チケットのカスタムフィールドの定義一覧（フィールドID・表示名・種類・ドロップダウンの選択肢と値）を取得する。"
+            "search_tickets / list_tickets の custom_field_filters や custom_fields に指定する名前・値を調べるのに使う"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "keyword":          {"type": "string",  "description": "フィールド名または選択肢名に含まれる文字列で絞り込む（例: '製品'）"},
+                "include_inactive": {"type": "boolean", "description": "無効化されたフィールドも含める", "default": False},
+                "include_system":   {"type": "boolean", "description": "件名・ステータスなどの標準フィールドも含める", "default": False},
+                "max_options":      {"type": "integer", "description": "フィールドごとに表示する選択肢の上限（デフォルト: keyword なしは5、ありは200）。0で全件"},
             },
         },
     },
@@ -1054,6 +1076,11 @@ def tool_search_tickets(args: dict) -> str:
         if args.get(key):
             query = f"{query} {modifier}{args[key]}"
 
+    cf_query = _custom_field_query(args.get("custom_field_filters"))
+    if cf_query:
+        query = f"{query} {cf_query}".strip()
+    selector = _list_field_selector(args)
+
     full_query = f"type:ticket {query}"
     if max_total > 1000:
         tickets, remaining = zd_search_export(full_query, max_total=max_total)
@@ -1069,7 +1096,7 @@ def tool_search_tickets(args: dict) -> str:
         assignee_id  = t.get("assignee_id", "")
         requester_id = t.get("requester_id", "")
         subject = mask_free_text(t.get("subject") or "")
-        lines.append(f"[#{t['id']}] {subject} | {t['status']} | requester_id: {requester_id} | 担当者ID: {assignee_id} | 作成: {t['created_at'][:10]} | タグ: {','.join(t.get('tags',[]))}")
+        lines.append(f"[#{t['id']}] {subject} | {t['status']} | requester_id: {requester_id} | 担当者ID: {assignee_id} | 作成: {t['created_at'][:10]} | タグ: {','.join(t.get('tags',[]))}{_inline_custom_fields(t, selector)}")
     return "\n".join(lines) + _remaining_msg(remaining)
 
 
@@ -1077,20 +1104,105 @@ def tool_search_tickets(args: dict) -> str:
 
 _TICKET_FIELD_TITLES: dict[int, str] | None = None
 _TICKET_FIELD_TYPES: dict[int, str] = {}
+# id -> {選択肢の値(タグ): 表示名}。ドロップダウン・複数選択の値を表示名に戻すのに使う。
+_TICKET_FIELD_OPTIONS: dict[int, dict[str, str]] = {}
+# /ticket_fields.json の生データ (list_ticket_fields 用)
+_TICKET_FIELD_DEFS: list[dict] = []
 
 
 def _ticket_field_titles() -> dict[int, str]:
     """カスタムフィールド id -> 表示名。初回のみ API を叩いてプロセス内にキャッシュ。
-    同じ応答からフィールドの種類 (id -> type) も _TICKET_FIELD_TYPES に保持する。"""
-    global _TICKET_FIELD_TITLES, _TICKET_FIELD_TYPES
+    同じ応答からフィールドの種類 (id -> type)・選択肢 (id -> {値: 表示名})・定義そのものも保持する。
+
+    取得に失敗したときは空の辞書を返すが、キャッシュはしない (次の呼び出しで再取得する)。"""
+    global _TICKET_FIELD_TITLES, _TICKET_FIELD_TYPES, _TICKET_FIELD_OPTIONS, _TICKET_FIELD_DEFS
     if _TICKET_FIELD_TITLES is None:
         try:
-            fields = zd_get("/ticket_fields.json").get("ticket_fields", [])
-            _TICKET_FIELD_TITLES = {f["id"]: f.get("title", "") for f in fields}
-            _TICKET_FIELD_TYPES = {f["id"]: f.get("type", "") for f in fields}
+            # 100 件を超えるとページングされるので全ページ取る
+            fields, _ = zd_get_all("/ticket_fields.json", "ticket_fields", max_total=10000)
         except Exception:
-            _TICKET_FIELD_TITLES, _TICKET_FIELD_TYPES = {}, {}
+            return {}
+        _TICKET_FIELD_DEFS = fields
+        _TICKET_FIELD_TYPES = {f["id"]: f.get("type", "") for f in fields}
+        _TICKET_FIELD_OPTIONS = {
+            f["id"]: {
+                str(o.get("value")): o.get("name") or str(o.get("value"))
+                for o in (f.get("custom_field_options") or [])
+                if o.get("value") is not None
+            }
+            for f in fields
+            if f.get("custom_field_options")
+        }
+        _TICKET_FIELD_TITLES = {f["id"]: f.get("title", "") for f in fields}
     return _TICKET_FIELD_TITLES
+
+
+def _option_name(field_id, value) -> str:
+    """ドロップダウン・複数選択の値 (タグ) を表示名にする。定義に無ければ値のまま。"""
+    return _TICKET_FIELD_OPTIONS.get(field_id, {}).get(str(value), str(value))
+
+
+def _resolve_ticket_field(ref) -> int:
+    """フィールド ID (数値・数字文字列) または表示名からカスタムフィールド ID を引く。
+
+    表示名は 完全一致 → 大文字小文字を無視した一致 → 部分一致 (1件に絞れるときだけ) の順に探す。
+    見つからない・複数に当たるときは、候補を添えて ValueError を投げる。"""
+    titles = _ticket_field_titles()
+    text = str(ref).strip()
+    if text.isdigit():
+        fid = int(text)
+        if titles and fid not in titles:
+            raise ValueError(f"カスタムフィールド ID {fid} は存在しません。list_ticket_fields で確認してください")
+        return fid
+    for match in (
+        lambda t: t == text,
+        lambda t: t.lower() == text.lower(),
+        lambda t: text.lower() in t.lower(),
+    ):
+        hits = [fid for fid, t in titles.items() if match(t)]
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            names = ", ".join(f"{titles[h]} (ID {h})" for h in hits[:10])
+            raise ValueError(f"カスタムフィールド「{text}」に当てはまるものが複数あります: {names}。ID で指定してください")
+    raise ValueError(f"カスタムフィールド「{text}」が見つかりません。list_ticket_fields で確認してください")
+
+
+def _search_value(fid: int, value) -> str:
+    """検索条件の値を Zendesk 検索の書式にする。選択肢は表示名でも値 (タグ) でも受け付ける。"""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    text = str(value).strip()
+    options = _TICKET_FIELD_OPTIONS.get(fid)
+    if options and text not in options:
+        by_name = [v for v, n in options.items() if n == text] or \
+                  [v for v, n in options.items() if n.lower() == text.lower() or v.lower() == text.lower()]
+        if len(by_name) == 1:
+            text = by_name[0]
+        else:
+            # 表示名が「親::子」形式のとき、末尾の名前だけでも当てる
+            by_leaf = [v for v, n in options.items() if n.split("::")[-1].strip() == text]
+            if len(by_leaf) == 1:
+                text = by_leaf[0]
+            else:
+                sample = ", ".join(f"{n} (= {v})" for v, n in list(options.items())[:10])
+                raise ValueError(f"「{text}」は {_TICKET_FIELD_TITLES.get(fid, fid)} の選択肢にありません。選択肢の例: {sample}")
+    if re.search(r"\s", text) or '"' in text:
+        text = '"' + text.replace('"', '') + '"'
+    return text
+
+
+def _custom_field_query(filters) -> str:
+    """{フィールド(表示名 or ID): 値} を `custom_field_<id>:<値>` の検索修飾子にする。"""
+    if not filters:
+        return ""
+    if not isinstance(filters, dict):
+        raise ValueError("custom_field_filters は {\"フィールド名またはID\": \"値\"} の形で指定してください")
+    parts = []
+    for ref, value in filters.items():
+        fid = _resolve_ticket_field(ref)
+        parts.append(f"custom_field_{fid}:{_search_value(fid, value)}")
+    return " ".join(parts)
 
 
 # 人名を保持するカスタムフィールド。regex では人名を検出できないため、
@@ -1121,20 +1233,111 @@ def _mask_ticket_field(title: str, field_type: str, value: str) -> str:
     return mask_user_field(title, value)
 
 
-def _format_custom_fields(t: dict) -> list[str]:
-    """値が入っているカスタムフィールドだけを「表示名: 値」の行にする。"""
+def _custom_field_pairs(t: dict, only_ids: list[int] | None = None) -> list[tuple[str, str]]:
+    """値が入っているカスタムフィールドを (表示名, 値) の組にする。
+
+    選択肢の値 (タグ) は表示名に戻し、マスク規則を適用する。
+    only_ids を渡すとそのフィールドだけを、その順で返す。"""
     titles = _ticket_field_titles()
-    rows = []
-    for cf in t.get("custom_fields") or []:
-        v = cf.get("value")
+    by_id = {cf.get("id"): cf.get("value") for cf in (t.get("custom_fields") or [])}
+    ids = only_ids if only_ids is not None else list(by_id)
+    pairs = []
+    for fid in ids:
+        v = by_id.get(fid)
         if v is None or v == "" or v is False or v == []:
             continue
         if isinstance(v, list):
-            v = ", ".join(str(x) for x in v)
-        title = titles.get(cf.get("id")) or f"field_{cf.get('id')}"
-        v = _mask_ticket_field(title, _TICKET_FIELD_TYPES.get(cf.get("id"), ""), str(v))
-        rows.append(f"- {title}: {v}")
-    return rows
+            v = ", ".join(_option_name(fid, x) for x in v)
+        else:
+            v = _option_name(fid, v)
+        title = titles.get(fid) or f"field_{fid}"
+        pairs.append((title, _mask_ticket_field(title, _TICKET_FIELD_TYPES.get(fid, ""), str(v))))
+    return pairs
+
+
+def _format_custom_fields(t: dict) -> list[str]:
+    """値が入っているカスタムフィールドだけを「表示名: 値」の行にする。"""
+    return [f"- {title}: {v}" for title, v in _custom_field_pairs(t)]
+
+
+def _list_field_selector(args: dict):
+    """一覧系ツールの custom_fields / include_all_custom_fields 引数を解釈する。
+    戻り値: None (表示しない) / [] 以外の ID リスト / "all"。"""
+    if args.get("include_all_custom_fields"):
+        return "all"
+    refs = args.get("custom_fields") or []
+    if isinstance(refs, (str, int)):
+        refs = [refs]
+    return [_resolve_ticket_field(r) for r in refs] or None
+
+
+def _inline_custom_fields(t: dict, selector) -> str:
+    """一覧の1行に付け足すカスタムフィールド部分 (例: ' | 製品名: Model X; OS: iOS')。"""
+    if not selector:
+        return ""
+    pairs = _custom_field_pairs(t, None if selector == "all" else selector)
+    if not pairs:
+        return ""
+    return " | " + "; ".join(f"{title}: {v.replace(chr(10), ' ')}" for title, v in pairs)
+
+
+# Zendesk 標準のチケットフィールドの種類 (removable が true でも標準扱いにする)
+_SYSTEM_FIELD_TYPES = {
+    "subject", "description", "status", "custom_status", "tickettype", "priority",
+    "group", "assignee", "brand",
+}
+
+
+def _is_system_field(f: dict) -> bool:
+    return not f.get("removable", True) or f.get("type") in _SYSTEM_FIELD_TYPES
+
+
+def tool_list_ticket_fields(args: dict) -> str:
+    keyword          = (args.get("keyword") or "").strip()
+    include_inactive = bool(args.get("include_inactive"))
+    include_system   = bool(args.get("include_system"))
+    max_options      = args.get("max_options", 5 if not keyword else 200)
+
+    if not _ticket_field_titles():
+        return "チケットフィールドの定義を取得できませんでした（権限がないか、通信に失敗しました）"
+
+    fields = []
+    for f in _TICKET_FIELD_DEFS:
+        if not include_system and _is_system_field(f):
+            continue  # 件名・ステータスなどの標準フィールド
+        if not include_inactive and not f.get("active", True):
+            continue
+        if keyword:
+            names = [f.get("title", "")] + [o.get("name", "") for o in (f.get("custom_field_options") or [])]
+            if not any(keyword.lower() in n.lower() for n in names):
+                continue
+        fields.append(f)
+
+    label = f"（「{keyword}」で絞り込み）" if keyword else ""
+    lines = [
+        f"チケットフィールド一覧{label}: {len(fields)} 件",
+        "検索・一覧の絞り込みは custom_field_filters に {\"表示名またはID\": \"値\"} を渡す"
+        "（Zendesk 検索修飾子では custom_field_<ID>:<値>）。選択肢は表示名でも値でも指定できる。\n",
+    ]
+    for f in fields:
+        flags = []
+        if not f.get("active", True):
+            flags.append("無効")
+        if _is_system_field(f):
+            flags.append("標準")
+        flag = f" [{'・'.join(flags)}]" if flags else ""
+        lines.append(f"[ID {f['id']}] {f.get('title', '')}（{f.get('type', '?')}）{flag}")
+        options = f.get("custom_field_options") or []
+        if options:
+            if keyword and keyword.lower() not in f.get("title", "").lower():
+                # 選択肢の名前で当たったときは、当たった選択肢だけ出す
+                options = [o for o in options if keyword.lower() in (o.get("name") or "").lower()]
+            shown = options[:max_options] if max_options else options
+            for o in shown:
+                lines.append(f"    - {o.get('name', '')} = {o.get('value', '')}")
+            if len(options) > len(shown):
+                lines.append(f"    …他 {len(options) - len(shown)} 件（keyword で絞り込むか max_options を増やすと表示）")
+    return "\n".join(lines)
 
 
 # ── コメント取得・投稿者の判定 ────────────────────────────
@@ -1334,9 +1537,13 @@ def tool_list_tickets(args: dict) -> str:
         if args.get(key):
             date_query += f" {modifier}{args[key]}"
 
-    if tags or date_query:
+    cf_query = _custom_field_query(args.get("custom_field_filters"))
+    selector = _list_field_selector(args)
+
+    if tags or date_query or cf_query:
         tag_query = " ".join(f"tags:{t}" for t in tags)
-        query     = f"type:ticket status:{status} {tag_query}{date_query}".strip()
+        query     = f"type:ticket status:{status} {tag_query}{date_query} {cf_query}".strip()
+        query     = re.sub(r"\s+", " ", query)
         tickets, remaining = zd_get_all(
             "/search.json", "results",
             {"query": query, "sort_by": "updated_at", "sort_order": "desc"},
@@ -1347,6 +1554,8 @@ def tool_list_tickets(args: dict) -> str:
             label_parts.append(f"タグ: {', '.join(tags)}")
         if date_query:
             label_parts.append(date_query.strip())
+        if cf_query:
+            label_parts.append(cf_query)
         lines = [f"チケット一覧（{status} / {' / '.join(label_parts)}）: {len(tickets)} 件\n"]
     else:
         tickets, remaining = zd_get_all(
@@ -1358,7 +1567,7 @@ def tool_list_tickets(args: dict) -> str:
 
     for t in tickets:
         subject = mask_free_text(t.get("subject") or "")
-        lines.append(f"[#{t['id']}] {subject} | 更新: {t['updated_at'][:10]} | タグ: {','.join(t.get('tags',[]))}")
+        lines.append(f"[#{t['id']}] {subject} | 更新: {t['updated_at'][:10]} | タグ: {','.join(t.get('tags',[]))}{_inline_custom_fields(t, selector)}")
     return "\n".join(lines) + _remaining_msg(remaining)
 
 
@@ -1796,6 +2005,7 @@ TOOL_HANDLERS = {
     "search_tickets":     tool_search_tickets,
     "get_ticket":         tool_get_ticket,
     "list_tickets":       tool_list_tickets,
+    "list_ticket_fields": tool_list_ticket_fields,
     "get_ticket_stats":   tool_get_ticket_stats,
     "suggest_reply":      tool_suggest_reply,
     "search_kb_articles": tool_search_kb_articles,
