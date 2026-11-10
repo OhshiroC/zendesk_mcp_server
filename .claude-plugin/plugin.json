@@ -1,8 +1,8 @@
 {
   "name": "zendesk-mcp-server",
   "displayName": "Zendesk MCP Server",
-  "version": "2.0.2",
-  "description": "Zendesk を Claude から直接操作する MCP サーバー（チケット・ナレッジベース・ユーザー・CSAT の15ツール）",
+  "version": "2.1.0",
+  "description": "Zendesk を Claude から直接操作する MCP サーバー（チケット・ナレッジベース・ユーザー・CSAT の18ツール）",
   "author": {
     "name": "OhshiroC"
   },
