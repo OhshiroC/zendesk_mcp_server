@@ -20,6 +20,7 @@ import re
 import sys
 import ssl
 import base64
+import difflib
 import hashlib
 import html
 import http.server
@@ -775,11 +776,15 @@ TOOLS = [
     },
     {
         "name": "get_ticket",
-        "description": "チケットIDを指定して詳細情報・カスタムフィールド・コメント一覧を取得する",
+        "description": (
+            "チケットIDを指定して詳細情報・カスタムフィールド・コメント一覧を取得する。"
+            "コメントごとに公開返信/社内メモの別と、投稿者（顧客/エージェント/Claude など）を表示する"
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "ticket_id": {"type": "integer", "description": "ZendeskチケットID"},
+                "ticket_id":      {"type": "integer", "description": "ZendeskチケットID"},
+                "max_body_chars": {"type": "integer", "description": "コメント1件あたりの最大文字数（デフォルト800）。0で全文", "default": 800},
             },
             "required": ["ticket_id"],
         },
@@ -921,6 +926,8 @@ TOOLS = [
         "name": "add_internal_note",
         "description": (
             "チケットに社内メモ（非公開コメント・顧客には見えない）を追加する。公開返信は送れない。"
+            "顧客への返信の下書きを残すときだけ kind=\"draft\" にする（本文先頭に【返信下書き】、チケットに claude_draft タグが付き、"
+            "compare_draft_replies で実際の返信と比較できるようになる）。調査メモ・引き継ぎ等は kind=\"memo\"（デフォルト）。"
             "本文に [EMAIL] などのマスク用プレースホルダを含めないこと"
         ),
         "inputSchema": {
@@ -928,8 +935,28 @@ TOOLS = [
             "properties": {
                 "ticket_id": {"type": "integer", "description": "社内メモを追加するチケットID"},
                 "body":      {"type": "string",  "description": "社内メモの本文（プレーンテキスト）"},
+                "kind":      {"type": "string",  "enum": ["memo", "draft"], "default": "memo",
+                              "description": "memo: 通常の社内メモ（デフォルト） / draft: 顧客への返信の下書き"},
             },
             "required": ["ticket_id", "body"],
+        },
+    },
+    {
+        "name": "compare_draft_replies",
+        "description": (
+            "add_internal_note(kind=draft) で残した返信下書きと、その後にエージェントが実際に送った公開返信を組にして返す。"
+            "類似度（0〜100%）と両方の本文を返すので、どこが直されたかの分析に使う。"
+            "ticket_id を指定するとそのチケットだけ、省略すると claude_draft タグの付いたチケットをまとめて調べる"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ticket_id":      {"type": "integer", "description": "対象チケットID（省略時は claude_draft タグのチケットを検索）"},
+                "updated_after":  {"type": "string",  "description": "この日付以降に更新されたチケット（YYYY-MM-DD）"},
+                "updated_before": {"type": "string",  "description": "この日付以前に更新されたチケット（YYYY-MM-DD）"},
+                "max_tickets":    {"type": "integer", "description": "調べるチケットの上限（デフォルト20、最大100）", "default": 20},
+                "max_body_chars": {"type": "integer", "description": "本文1件あたりの最大文字数（デフォルト2000）。0で全文", "default": 2000},
+            },
         },
     },
 
@@ -1110,10 +1137,81 @@ def _format_custom_fields(t: dict) -> list[str]:
     return rows
 
 
+# ── コメント取得・投稿者の判定 ────────────────────────────
+
+# 返信下書きの目印。本文先頭に付け、チケットにはタグを付ける (タグはチケット単位なので、
+# 同じチケット内のメモと下書きを区別するためにコメント単位の目印が要る)。
+DRAFT_MARKER = "【返信下書き】"
+DRAFT_TAG    = "claude_draft"
+
+
+def _all_comments(tid: int) -> list:
+    """チケットの全コメントを古い順に取得する (100 件を超える場合もページを辿る)。"""
+    cmts, _ = zd_get_all(f"/tickets/{tid}/comments.json", "comments", max_total=10_000)
+    return cmts
+
+
+def _user_roles(user_ids) -> dict[int, str]:
+    """user_id -> role (end-user / agent / admin)。取得に失敗したら空 dict。"""
+    ids = sorted({i for i in user_ids if i})
+    roles: dict[int, str] = {}
+    try:
+        for i in range(0, len(ids), 100):
+            chunk = ",".join(str(x) for x in ids[i:i + 100])
+            for u in zd_get("/users/show_many.json", {"ids": chunk}).get("users", []):
+                roles[u["id"]] = u.get("role", "")
+    except Exception:
+        return {}
+    return roles
+
+
+def _claude_author_id() -> int | None:
+    try:
+        return _note_author_id()
+    except RuntimeError:
+        return None
+
+
+def _is_agent(aid, requester_id, roles: dict) -> bool:
+    """エージェント/管理者か。ロールが引けないときは「依頼者以外ならエージェント」とみなす。"""
+    role = roles.get(aid)
+    if role:
+        return role in _AGENT_ROLES
+    return aid != requester_id
+
+
+def _comment_author_label(c: dict, requester_id, roles: dict, claude_id) -> str:
+    aid = c.get("author_id")
+    if claude_id is not None and aid == claude_id:
+        return "Claude"
+    # 依頼者がエージェント自身の社内チケットでは、本人の社内メモを「顧客」と表示しない
+    if aid == requester_id and (c.get("public") or not _is_agent(aid, requester_id, roles)):
+        return "顧客"
+    role = roles.get(aid)
+    if role in _AGENT_ROLES:
+        return "エージェント"
+    if role == "end-user":
+        return "エンドユーザー"
+    return "エージェント"  # ロール不明時は従来どおり
+
+
+def _truncate(text: str, limit: int) -> str:
+    if limit and len(text) > limit:
+        return text[:limit] + f"…（以下 {len(text) - limit} 文字省略）"
+    return text
+
+
+def _is_draft(c: dict) -> bool:
+    return (not c.get("public")) and (c.get("body") or "").lstrip().startswith(DRAFT_MARKER)
+
+
 def tool_get_ticket(args: dict) -> str:
-    tid  = args["ticket_id"]
-    t    = zd_get(f"/tickets/{tid}.json")["ticket"]
-    cmts = zd_get(f"/tickets/{tid}/comments.json")["comments"]
+    tid   = args["ticket_id"]
+    limit = max(int(args.get("max_body_chars", 800) or 0), 0)
+    t     = zd_get(f"/tickets/{tid}.json")["ticket"]
+    cmts  = _all_comments(tid)
+    roles = _user_roles(c.get("author_id") for c in cmts)
+    claude_id = _claude_author_id()
     lines = [
         f"# チケット #{tid}: {mask_free_text(t.get('subject') or '')}",
         f"ステータス: {t['status']} | 優先度: {t.get('priority','なし')}",
@@ -1124,12 +1222,101 @@ def tool_get_ticket(args: dict) -> str:
     cf_rows = _format_custom_fields(t)
     if cf_rows:
         lines += ["", "## カスタムフィールド"] + cf_rows
-    lines += ["", "## コメント"]
+    lines += ["", f"## コメント（{len(cmts)} 件）"]
     for c in cmts:
-        author = "顧客" if c["author_id"] == t["requester_id"] else "エージェント"
-        body = mask_free_text((c.get("body") or "")[:800])
-        lines.append(f"\n[{author} / {c['created_at'][:10]}]\n{body}")
+        author = _comment_author_label(c, t.get("requester_id"), roles, claude_id)
+        kind   = "公開返信" if c.get("public") else ("社内メモ・返信下書き" if _is_draft(c) else "社内メモ")
+        body   = mask_free_text(_truncate(c.get("body") or "", limit))
+        lines.append(f"\n[{author} / {kind} / {c['created_at'][:16].replace('T', ' ')}]\n{body}")
     return "\n".join(lines)
+
+
+# ── 返信下書きと実際の返信の比較 ──────────────────────────
+
+def _strip_marker(text: str) -> str:
+    text = text.lstrip()
+    return text[len(DRAFT_MARKER):].lstrip() if text.startswith(DRAFT_MARKER) else text
+
+
+def _similarity(a: str, b: str) -> int:
+    """空白の違いを無視した文字列の類似度 (0〜100)。"""
+    norm = lambda x: re.sub(r"\s+", "", x)
+    return round(difflib.SequenceMatcher(None, norm(a), norm(b), autojunk=False).ratio() * 100)
+
+
+def _pair_drafts(cmts: list, requester_id, roles: dict, claude_id) -> list[dict]:
+    """下書きごとに、その後に最初に送られたエージェントの公開返信を対応付ける。
+    返信より前に次の下書きが来た場合、前の下書きは「差し替え」扱いにする。"""
+    pairs = []
+    for i, c in enumerate(cmts):
+        if not _is_draft(c):
+            continue
+        pair = {"draft": c, "reply": None, "superseded": False}
+        for later in cmts[i + 1:]:
+            if _is_draft(later):
+                pair["superseded"] = True
+                break
+            aid = later.get("author_id")
+            if later.get("public") and aid != claude_id and _is_agent(aid, requester_id, roles):
+                pair["reply"] = later
+                break
+        pairs.append(pair)
+    return pairs
+
+
+def tool_compare_draft_replies(args: dict) -> str:
+    limit = max(int(args.get("max_body_chars", 2000) or 0), 0)
+    if args.get("ticket_id"):
+        tickets = [zd_get(f"/tickets/{args['ticket_id']}.json")["ticket"]]
+        remaining = None
+    else:
+        q = f"type:ticket tags:{DRAFT_TAG}"
+        if args.get("updated_after"):
+            q += f" updated>{args['updated_after']}"
+        if args.get("updated_before"):
+            q += f" updated<{args['updated_before']}"
+        max_tickets = min(max(int(args.get("max_tickets", 20) or 20), 1), 100)
+        tickets, remaining = zd_get_all("/search.json", "results",
+                                        {"query": q, "sort_by": "updated_at", "sort_order": "desc"},
+                                        max_total=max_tickets)
+
+    claude_id = _claude_author_id()
+    sections, sims, n_pending, n_superseded = [], [], 0, 0
+    for t in tickets:
+        cmts  = _all_comments(t["id"])
+        roles = _user_roles(c.get("author_id") for c in cmts)
+        for p in _pair_drafts(cmts, t.get("requester_id"), roles, claude_id):
+            d = p["draft"]
+            head = (f"### チケット #{t['id']}: {mask_free_text(t.get('subject') or '')}\n"
+                    f"下書き: {d['created_at'][:16].replace('T', ' ')}")
+            draft_text = _strip_marker(d.get("body") or "")
+            if p["superseded"]:
+                n_superseded += 1
+                sections.append(head + "\n状態: 差し替え（返信より前に新しい下書きあり）")
+                continue
+            if p["reply"] is None:
+                n_pending += 1
+                sections.append(head + "\n状態: 未返信（下書きの後にエージェントの公開返信なし）\n\n"
+                                f"--- 下書き ---\n{mask_free_text(_truncate(draft_text, limit))}")
+                continue
+            r = p["reply"]; reply_text = r.get("body") or ""
+            sim = _similarity(draft_text, reply_text); sims.append(sim)
+            sections.append(
+                head + f" → 返信: {r['created_at'][:16].replace('T', ' ')}\n"
+                f"類似度: {sim}%\n\n"
+                f"--- 下書き ---\n{mask_free_text(_truncate(draft_text, limit))}\n\n"
+                f"--- 実際の返信 ---\n{mask_free_text(_truncate(reply_text, limit))}"
+            )
+
+    summary = [
+        "# 返信下書きと実際の返信の比較", "",
+        f"対象チケット: {len(tickets)} 件 | 比較できた組: {len(sims)} 件 | 未返信: {n_pending} 件 | 差し替え: {n_superseded} 件",
+    ]
+    if sims:
+        summary.append(f"類似度: 平均 {round(sum(sims) / len(sims))}% / 最小 {min(sims)}% / 最大 {max(sims)}%")
+    if not sections:
+        summary.append("\n返信下書き（kind=draft の社内メモ）が見つかりませんでした。")
+    return "\n".join(summary) + "\n\n" + "\n\n".join(sections) + _remaining_msg(remaining)
 
 
 def tool_list_tickets(args: dict) -> str:
@@ -1544,8 +1731,13 @@ def tool_add_internal_note(args: dict) -> str:
         return "社内メモの投稿は無効化されています。拡張機能の設定で「社内メモ投稿・記事公開を許可」をオンにしてください。"
     tid  = int(args["ticket_id"])
     body = args.get("body") or ""
+    kind = args.get("kind") or "memo"
     if not body.strip():
         return "本文が空です。"
+    if kind not in ("memo", "draft"):
+        return f"kind は memo か draft を指定してください（指定値: {kind!r}）。"
+    if kind == "draft" and not body.lstrip().startswith(DRAFT_MARKER):
+        body = f"{DRAFT_MARKER}\n{body}"
 
     author_id = _note_author_id()
     author_label = "ログイン中のユーザー"
@@ -1566,13 +1758,24 @@ def tool_add_internal_note(args: dict) -> str:
             "直ちに Zendesk 上で確認してください。"
         )
     note = comments[0]
+    tag_warning = None
+    if kind == "draft":
+        # PUT /tags は既存タグを残したまま追加する (POST は置き換え)。チケット更新の
+        # additional_tags は単体更新では無視されるため使わない。
+        try:
+            zd_put(f"/tickets/{tid}/tags.json", {"tags": [DRAFT_TAG]})
+        except Exception as e:
+            tag_warning = f"⚠️ {DRAFT_TAG} タグの付与に失敗しました（{e}）。下書きは投稿済みです。"
     lines = [
         "# 社内メモを投稿しました",
         "",
         f"チケット: #{tid}",
         f"コメントID: {note.get('id')}（非公開を確認済み）",
         f"投稿者: {author_label}",
+        f"種類: {'返信下書き（claude_draft タグを付与）' if kind == 'draft' else '社内メモ'}",
     ]
+    if tag_warning:
+        lines.append(tag_warning)
     if author_id is not None and note.get("author_id") != author_id:
         lines.append(
             f"⚠️ 投稿者が指定どおりになっていません（実際の author_id: {note.get('author_id')}）。"
@@ -1606,6 +1809,7 @@ TOOL_HANDLERS = {
     "create_kb_article":  tool_create_kb_article,
     "update_kb_article":  tool_update_kb_article,
     "add_internal_note":  tool_add_internal_note,
+    "compare_draft_replies": tool_compare_draft_replies,
 }
 
 # ENABLE_SENSITIVE_WRITES が OFF のとき tools/list から隠すツール
