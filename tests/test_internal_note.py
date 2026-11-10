@@ -77,7 +77,40 @@ def test_enabled_lists_tool(enabled):
 
 def test_tool_schema_has_no_public_or_author_switch():
     tool = next(t for t in server.TOOLS if t["name"] == "add_internal_note")
-    assert set(tool["inputSchema"]["properties"]) == {"ticket_id", "body"}
+    assert set(tool["inputSchema"]["properties"]) == {"ticket_id", "body", "kind"}
+
+
+# ── 種類 (memo / draft) ───────────────────────────────
+
+def test_memo_is_default_and_adds_no_tag(enabled, zd):
+    out = server.tool_add_internal_note({"ticket_id": 42, "body": "調査メモ"})
+    assert zd[1].call_args[0][1] == {"ticket": {"comment": {"body": "調査メモ", "public": False}}}
+    assert "種類: 社内メモ" in out
+
+
+def test_draft_adds_marker_and_tag(enabled, zd):
+    out = server.tool_add_internal_note({"ticket_id": 42, "body": "お問い合わせありがとうございます。", "kind": "draft"})
+    (c1, c2) = zd[1].call_args_list
+    assert c1.args == ("/tickets/42.json", {"ticket": {"comment": {"body": "【返信下書き】\nお問い合わせありがとうございます。", "public": False}}})
+    # PUT /tags.json は既存タグを残して追加する (POST だと置き換えになる)
+    assert c2.args == ("/tickets/42/tags.json", {"tags": ["claude_draft"]})
+    assert "返信下書き" in out and "⚠️" not in out
+
+
+def test_draft_tag_failure_is_reported_not_raised(enabled, zd):
+    zd[1].side_effect = [_put_ok(), RuntimeError("403")]
+    out = server.tool_add_internal_note({"ticket_id": 42, "body": "b", "kind": "draft"})
+    assert "投稿しました" in out and "タグの付与に失敗" in out
+
+
+def test_draft_marker_not_duplicated(enabled, zd):
+    server.tool_add_internal_note({"ticket_id": 42, "body": "【返信下書き】\n本文", "kind": "draft"})
+    assert zd[1].call_args_list[0].args[1]["ticket"]["comment"]["body"] == "【返信下書き】\n本文"
+
+
+def test_unknown_kind_refused(enabled, zd):
+    assert "memo か draft" in server.tool_add_internal_note({"ticket_id": 42, "body": "b", "kind": "public"})
+    zd[1].assert_not_called()
 
 
 # ── 投稿 ──────────────────────────────────────────────
