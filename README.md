@@ -379,6 +379,58 @@ Claude Desktop が uv を自動取得し、`pyproject.toml` / `uv.lock` に従�
 
 ---
 
+## Zendesk アプリ「Claude 返信下書き」（任意）
+
+チケットのサイドバーから Claude Desktop に返信の下書きを頼み、届いた下書きを返信欄に入れるための
+Zendesk アプリです（`zendesk_app/`）。MCP サーバーとは独立した、入れなくても困らない追加機能です。
+
+```
+サイドバーのボタン ──▶ Claude Desktop が依頼文入りで開く ──▶ 送信
+                                   │ get_ticket などで読む（マスク済み）
+                                   ▼
+        サイドバーに表示 ◀── add_internal_note(kind: "draft") で社内メモに投稿
+              │
+              └─▶「返信欄に入れる」で公開返信の欄に挿入（送信は人が確認してから）
+```
+
+- アプリは Zendesk の API をエージェント本人のログインで呼びます。トークンや API キーは持ちません。
+- Claude に渡すのはチケット番号だけです。本文は Claude が MCP サーバー経由で読むので、個人情報のマスクがそのまま効きます。
+- 下書きは、MCP サーバーが付ける目印（`【返信下書き】`）で始まる社内メモとして見分けます。
+
+### 前提
+
+- 各エージェントの Claude Desktop にこの MCP サーバーの拡張機能が入っていて、
+  「社内メモの投稿・記事の公開」（`enable_sensitive_writes`）がオンになっていること。
+
+### インストール（管理者）
+
+1. [Releases](https://github.com/OhshiroC/zendesk_mcp_server/releases) から `claude-reply-drafts-zendesk-app.zip` をダウンロードします
+   （手元で作る場合は `make zendesk-app` で `dist/` に生成されます）。
+2. Zendesk 管理センター → アプリおよびインテグレーション → Zendesk Support アプリ →
+   「プライベートアプリをアップロード」で zip をアップロードします。
+3. 設定項目:
+
+| 項目 | 内容 |
+|---|---|
+| Claude への依頼文 | Claude Desktop の入力欄に入る文。`{{ticket_id}}` がチケット番号に置き換わる。チケットの中身は入れない |
+| 下書きの目印 | 既定は `【返信下書き】`。MCP サーバー側と同じにする |
+| Claude プロジェクトの URL（任意） | 下記「チャットを散らかさない」を参照 |
+
+### チャットを散らかさない（Claude プロジェクト）
+
+ボタンを押すたびに新しいチャットができます。1つのチャットを使い回すと、チケットの内容が積み重なって
+遅くなり、別のお客さんの話が混ざるおそれもあるため、あえてチケットごとに分けています。
+
+サイドバーが散らかるのを避けたい場合は、Claude のプロジェクト（例:「Zendesk 下書き」）の URL を設定します。
+プロジェクトのリンクでは入力欄に依頼文を入れられないため、ボタンでプロジェクトを開くと同時に依頼文を
+クリップボードにコピーします。入力欄に貼り付けて（⌘V / Ctrl+V）送信してください。
+
+- 管理者が設定した URL は全員の既定になります（チームで共有しているプロジェクト向け）。
+- エージェントはサイドバーの「設定」で自分のプロジェクトに変えられます（このブラウザにだけ保存）。
+- プロジェクトの指示に返信の書き方などを書いておくと、毎回の依頼文を短くできます。
+
+---
+
 ## 使用例
 
 ```
@@ -426,5 +478,10 @@ zendesk-mcp-server/
 │   └── marketplace.json         # このリポを1プラグインのマーケットとして定義
 ├── .env.example                 # 環境変数のテンプレート
 ├── claude_desktop_config.json   # Claude Desktop 設定サンプル（手動登録用）
+├── zendesk_app/                 # Zendesk アプリ「Claude 返信下書き」（`make zendesk-app` で zip 化）
+│   ├── manifest.json
+│   ├── translations/            # ja / en
+│   └── assets/                  # iframe.html・app.js（UI）・core.js（純粋な処理）・アイコン
+├── tests/js/                    # Zendesk アプリのテスト（`make test-js`）
 └── README.md
 ```

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <main id="app">
+    <section class="launch">
+      <a id="launch" class="btn primary" href="#" target="_blank" rel="noopener"></a>
+      <p id="launch-hint" class="hint"></p>
+      <p id="status" class="status" role="status" hidden></p>
+      <div id="manual-copy" hidden>
+        <p class="hint" id="manual-copy-label"></p>
+        <textarea id="manual-copy-text" readonly rows="4"></textarea>
+      </div>
+      <button id="copy" class="link" type="button"></button>
+    </section>
+
+    <section class="drafts">
+      <div class="drafts-head">
+        <h2 id="drafts-title"></h2>
+        <button id="refresh" class="link" type="button"></button>
+      </div>
+      <p id="drafts-empty" class="hint" hidden></p>
+      <p id="drafts-error" class="error" hidden></p>
+      <div id="draft" hidden>
+        <p id="draft-meta" class="meta"></p>
+        <pre id="draft-text" class="draft-text"></pre>
+        <button id="insert" class="btn" type="button"></button>
+        <p id="draft-more" class="hint" hidden></p>
+      </div>
+    </section>
+
+    <details class="settings" id="settings">
+      <summary id="settings-title"></summary>
+      <label for="project-url" id="project-label"></label>
+      <input id="project-url" type="url" placeholder="https://claude.ai/project/...">
+      <p id="project-source" class="hint"></p>
+      <p id="project-error" class="error" hidden></p>
+      <div class="row">
+        <button id="project-save" class="btn small" type="button"></button>
+        <button id="project-clear" class="link" type="button"></button>
+      </div>
+    </details>
+  </main>
+
+  <script src="https://static.zdassets.com/zendesk_app_framework_sdk/2.0/zaf_sdk.min.js"></script>
+  <script src="core.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

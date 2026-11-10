@@ -1,0 +1,78 @@
+:root {
+  --fg: #2f3941;
+  --muted: #68737d;
+  --border: #d8dcde;
+  --accent: #1f73b7;
+  --accent-hover: #144a75;
+  --bg-soft: #f8f9f9;
+  --error: #cc3340;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 2px 2px 8px;
+  font: 13px/1.5 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", sans-serif;
+  color: var(--fg);
+  background: #fff;
+}
+section { margin-bottom: 14px; }
+h2 { font-size: 13px; margin: 0; }
+.btn {
+  display: inline-block;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+.btn:hover { background: #edf7ff; }
+.btn.primary { background: var(--accent); color: #fff; }
+.btn.primary:hover { background: var(--accent-hover); }
+.btn.small { width: auto; padding: 4px 10px; }
+.link {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.link:hover { text-decoration: underline; }
+.hint, .meta { color: var(--muted); font-size: 12px; margin: 6px 0; }
+.status {
+  margin: 8px 0;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--bg-soft);
+  font-size: 12px;
+}
+.error { color: var(--error); font-size: 12px; margin: 6px 0; }
+.drafts-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
+.draft-text {
+  margin: 0 0 8px;
+  padding: 8px;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-soft);
+  font: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+textarea, input {
+  width: 100%;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: inherit;
+}
+.settings summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.settings label { display: block; margin: 8px 0 4px; font-size: 12px; }
+.row { display: flex; gap: 12px; align-items: center; }

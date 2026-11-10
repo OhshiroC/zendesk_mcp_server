@@ -19,3 +19,4 @@ claude_desktop_config.json
 Makefile
 .mcpbignore
 .DS_Store
+zendesk_app/

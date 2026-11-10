@@ -1,0 +1,22 @@
+{
+  "app": {
+    "name": "Claude 返信下書き",
+    "short_description": "Claude Desktop で返信の下書きを作り、チケットの返信欄に入れる",
+    "long_description": "チケットから Claude Desktop を開いて返信の下書きを依頼し、zendesk_mcp_server の add_internal_note（kind: draft）で投稿された下書きをサイドバーに表示します。下書きはワンクリックで返信欄に挿入できます。",
+    "installation_instructions": "各エージェントの Claude Desktop に zendesk_mcp_server の拡張機能をインストールし、社内メモの投稿（enable_sensitive_writes）をオンにしてください。",
+    "parameters": {
+      "prompt_template": {
+        "label": "Claude への依頼文",
+        "helpText": "Claude Desktop の入力欄に入る文。{{ticket_id}} はチケット番号に置き換わります。個人情報が Claude に渡らないよう、チケットの中身は入れず番号だけを渡します。"
+      },
+      "draft_marker": {
+        "label": "下書きの目印",
+        "helpText": "社内メモの先頭にこの文字列があるものを下書きとみなします。MCP サーバー側の目印と同じにしてください。"
+      },
+      "claude_project_url": {
+        "label": "Claude プロジェクトの URL（任意）",
+        "helpText": "https://claude.ai/project/... の形。設定すると、ボタンでこのプロジェクトを開き、依頼文をクリップボードにコピーします（プロジェクトのリンクでは依頼文を入力欄に入れられないため）。空なら、依頼文が入った新しいチャットを開きます。エージェントはサイドバーで自分用の URL に変えられます。"
+      }
+    }
+  }
+}

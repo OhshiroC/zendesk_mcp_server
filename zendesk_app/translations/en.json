@@ -1,0 +1,22 @@
+{
+  "app": {
+    "name": "Claude Reply Drafts",
+    "short_description": "Draft replies in Claude Desktop and insert them into the ticket reply",
+    "long_description": "Opens Claude Desktop from a ticket with a request to draft a reply, then shows the draft posted by zendesk_mcp_server's add_internal_note (kind: draft) in the sidebar. The draft can be inserted into the reply with one click.",
+    "installation_instructions": "Install the zendesk_mcp_server extension in each agent's Claude Desktop and turn on internal note posting (enable_sensitive_writes).",
+    "parameters": {
+      "prompt_template": {
+        "label": "Request to Claude",
+        "helpText": "Text placed in Claude Desktop's input. {{ticket_id}} is replaced with the ticket number. Only the number is passed, so ticket contents never bypass the MCP server's PII masking."
+      },
+      "draft_marker": {
+        "label": "Draft marker",
+        "helpText": "Internal notes starting with this text are treated as drafts. Must match the MCP server's marker."
+      },
+      "claude_project_url": {
+        "label": "Claude project URL (optional)",
+        "helpText": "In the form https://claude.ai/project/... . When set, the button opens this project and copies the request to the clipboard (project links cannot prefill the input). When empty, a new chat opens with the request prefilled. Agents can override it in the sidebar."
+      }
+    }
+  }
+}

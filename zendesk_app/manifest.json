@@ -1,0 +1,40 @@
+{
+  "name": "Claude Reply Drafts",
+  "author": {
+    "name": "OhshiroC",
+    "email": "noreply@github.com",
+    "url": "https://github.com/OhshiroC/zendesk_mcp_server"
+  },
+  "defaultLocale": "ja",
+  "private": true,
+  "location": {
+    "support": {
+      "ticket_sidebar": {
+        "url": "assets/iframe.html",
+        "flexible": true
+      }
+    }
+  },
+  "version": "1.0.0",
+  "frameworkVersion": "2.0",
+  "parameters": [
+    {
+      "name": "prompt_template",
+      "type": "multiline",
+      "required": false,
+      "default": "Zendesk のチケット #{{ticket_id}} に返信する下書きを作ってください。\nget_ticket でチケットを読み、必要に応じて search_kb_articles でヘルプ記事を確認してください。\nできた下書きは add_internal_note で kind に \"draft\" を指定して、このチケットに社内メモとして投稿してください。"
+    },
+    {
+      "name": "draft_marker",
+      "type": "text",
+      "required": false,
+      "default": "【返信下書き】"
+    },
+    {
+      "name": "claude_project_url",
+      "type": "text",
+      "required": false,
+      "default": ""
+    }
+  ]
+}

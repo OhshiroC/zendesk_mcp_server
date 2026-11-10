@@ -23,6 +23,9 @@ jobs:
       - name: Build .mcpb bundle
         run: make mcpb
 
+      - name: Build Zendesk app
+        run: make zendesk-app
+
       - name: Upload .mcpb to release
         if: github.event_name != 'workflow_dispatch'
         env:
@@ -30,6 +33,7 @@ jobs:
         run: |
           gh release upload "${GITHUB_REF_NAME}" \
             dist/zendesk-mcp-server.mcpb \
+            dist/claude-reply-drafts-zendesk-app.zip \
             --clobber
 
       # .tagpr で release = draft にしているのは、アセット添付前に Release が公開され
