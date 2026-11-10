@@ -39,7 +39,7 @@ def _format(custom_fields, mask_pii=True):
 # ── 値ありフィールドだけを行にする ───────────────────────────
 
 def test_value_field_is_rendered_with_title():
-    assert _format([{"id": 101, "value": "Nature Remo 3"}]) == ["- 製品名: Nature Remo 3"]
+    assert _format([{"id": 101, "value": "Model X"}]) == ["- 製品名: Model X"]
 
 
 @pytest.mark.parametrize("value", [None, "", False, []])
@@ -127,9 +127,9 @@ def _get_ticket(custom_fields):
 
 
 def test_get_ticket_renders_custom_field_section():
-    out = _get_ticket([{"id": 101, "value": "Nature Remo 3"}])
+    out = _get_ticket([{"id": 101, "value": "Model X"}])
     assert "## カスタムフィールド" in out
-    assert "- 製品名: Nature Remo 3" in out
+    assert "- 製品名: Model X" in out
     assert "## コメント" in out
 
 

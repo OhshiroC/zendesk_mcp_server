@@ -77,10 +77,22 @@ def _build_ssl_context() -> ssl.SSLContext:
 _SSL_CTX = _build_ssl_context()
 
 # ── 環境変数 ──────────────────────────────────────────────
-ZENDESK_SUBDOMAIN = os.environ.get("ZENDESK_SUBDOMAIN", "")
+def _normalize_subdomain(raw: str | None) -> str:
+    """サブドメインの入力ゆれを吸収する。
+
+    設定画面に URL やホスト名ごと入れられることが多いので、
+    "https://yourcompany.zendesk.com/" や "yourcompany.zendesk.com" も "yourcompany" にする。"""
+    s = (raw or "").strip().lower()
+    s = re.sub(r"^https?://", "", s).split("/")[0]
+    if s.endswith(".zendesk.com"):
+        s = s[: -len(".zendesk.com")]
+    return s
+
+
+ZENDESK_SUBDOMAIN = _normalize_subdomain(os.environ.get("ZENDESK_SUBDOMAIN"))
 ZENDESK_BASE      = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2"
 
-ZENDESK_OAUTH_CLIENT_ID     = os.environ.get("ZENDESK_OAUTH_CLIENT_ID", "")
+ZENDESK_OAUTH_CLIENT_ID     = (os.environ.get("ZENDESK_OAUTH_CLIENT_ID") or "").strip()
 ZENDESK_OAUTH_SCOPES        = os.environ.get("ZENDESK_OAUTH_SCOPES") or "read write"
 ZENDESK_OAUTH_REDIRECT_PORT = int(os.environ.get("ZENDESK_OAUTH_REDIRECT_PORT") or 47823)
 ZENDESK_OAUTH_TOKEN_CACHE   = os.environ.get("ZENDESK_OAUTH_TOKEN_CACHE", "")
@@ -1631,8 +1643,9 @@ def handle(body: dict) -> dict | None:
         return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": msg}}
 
     if method == "initialize":
-        if not all([ZENDESK_SUBDOMAIN, ZENDESK_OAUTH_CLIENT_ID]):
-            sys.stderr.write("[ERROR] 環境変数 ZENDESK_SUBDOMAIN / ZENDESK_OAUTH_CLIENT_ID が未設定です\n")
+        config_error = _config_error()
+        if config_error:
+            sys.stderr.write(f"[ERROR] {config_error}\n")
         return ok({
             "protocolVersion": "2024-11-05",
             "capabilities":    {"tools": {}},
@@ -1656,6 +1669,11 @@ def handle(body: dict) -> dict | None:
         args = body["params"].get("arguments", {})
         if name not in TOOL_HANDLERS:
             return err(-32601, f"Unknown tool: {name}")
+        config_error = _config_error()
+        if config_error:
+            # 設定が空のまま進むと「https://.zendesk.com/...」のような開けない認可 URL を出してしまう。
+            # 利用者に直し方を見せたいので、JSON-RPC エラーではなくツールのエラー結果として返す。
+            return ok({"content": [{"type": "text", "text": config_error}], "isError": True})
         try:
             result = TOOL_HANDLERS[name](args)
             if MASK_PII and name not in _MASK_EXEMPT_TOOLS:
@@ -1673,6 +1691,32 @@ def handle(body: dict) -> dict | None:
             return err(-32603, msg)
 
     return err(-32601, f"Method not found: {method}")
+
+
+_SUBDOMAIN_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def _config_error() -> str:
+    """必須の設定が足りない・不正なときに、利用者向けの直し方を返す。問題がなければ空文字。"""
+    missing = []
+    if not ZENDESK_SUBDOMAIN:
+        missing.append("サブドメイン（Zendesk Subdomain）")
+    if not ZENDESK_OAUTH_CLIENT_ID:
+        missing.append("OAuth クライアント ID（Zendesk OAuth Client ID）")
+    if missing:
+        problem = f"{'、'.join(missing)}が空です。"
+    elif not _SUBDOMAIN_RE.fullmatch(ZENDESK_SUBDOMAIN):
+        problem = (f"サブドメイン「{ZENDESK_SUBDOMAIN}」の形式が正しくありません"
+                   "（https://yourcompany.zendesk.com の yourcompany 部分を入れてください）。")
+    else:
+        return ""
+    return (
+        f"Zendesk MCP Server の設定が足りません: {problem}\n"
+        "Claude Desktop の「設定 → 拡張機能 → Zendesk MCP Server」で入力し、"
+        "Claude Desktop を再起動してください。\n"
+        "（拡張機能以外から起動している場合は、環境変数 ZENDESK_SUBDOMAIN / "
+        "ZENDESK_OAUTH_CLIENT_ID を設定してください）"
+    )
 
 
 def _force_utf8_stdio() -> None:
